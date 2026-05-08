@@ -30,5 +30,5 @@
 			"@server/*": ["src/server/*"]
 		}
 	},
-	"include": ["src/react-app", "src/shared"]
+	"include": ["src/react-app", "src/shared", "src/components", "src/lib", "src/hooks"]
 }

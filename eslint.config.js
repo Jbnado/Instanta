@@ -45,6 +45,14 @@ export default tseslint.config(
 					],
 					patterns: [
 						{
+							group: ["hono/*"],
+							message: "services puros não usam Hono (nem sub-paths) — mantenha em src/server/routes/",
+						},
+						{
+							group: ["cloudflare:*"],
+							message: "services puros não importam built-ins do runtime CF — encapsule em src/server/adapters/",
+						},
+						{
 							group: ["**/routes/**"],
 							message: "services não dependem de routes (inversão errada).",
 						},
