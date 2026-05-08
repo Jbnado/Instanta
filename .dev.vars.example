@@ -1,0 +1,11 @@
+# Variáveis locais de desenvolvimento — copie para .dev.vars (ignorado pelo git).
+# Em produção, use `wrangler secret put <NAME>` para cada secret.
+
+# Marca o ambiente. Em prod, este valor vem como env var no Worker.
+ENVIRONMENT=development
+
+# Adicione secrets locais aqui à medida que stories futuras (auth, Resend, Sentry) os introduzirem.
+# Exemplos (não usar valores reais):
+# RESEND_API_KEY=
+# SESSION_SECRET=
+# SENTRY_DSN=

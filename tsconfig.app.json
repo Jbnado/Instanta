@@ -20,7 +20,15 @@
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
 		"noFallthroughCasesInSwitch": true,
-		"noUncheckedSideEffectImports": true
+		"noUncheckedSideEffectImports": true,
+
+		/* Path aliases */
+		"baseUrl": ".",
+		"paths": {
+			"@/*": ["src/*"],
+			"@shared/*": ["src/shared/*"],
+			"@server/*": ["src/server/*"]
+		}
 	},
-	"include": ["src/react-app"]
+	"include": ["src/react-app", "src/shared"]
 }

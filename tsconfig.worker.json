@@ -2,7 +2,13 @@
 	"extends": "./tsconfig.node.json",
 	"compilerOptions": {
 		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
-		"types": ["vite/client", "./worker-configuration.d.ts"]
+		"types": ["vite/client", "./worker-configuration.d.ts"],
+		"baseUrl": ".",
+		"paths": {
+			"@/*": ["src/*"],
+			"@shared/*": ["src/shared/*"],
+			"@server/*": ["src/server/*"]
+		}
 	},
-	"include": ["src/worker"]
+	"include": ["src/server", "src/shared"]
 }
