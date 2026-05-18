@@ -25,7 +25,8 @@
 			"database_id": "53e7b4bb-cff3-4b1c-b87f-07fc3186ae66",
 			// preview_database_id é usado por `wrangler dev --remote` e `wrangler preview`.
 			// Por enquanto aponta para o mesmo D1 dev; um D1 preview separado vira em pré-deploy (Story 1.4).
-			"preview_database_id": "53e7b4bb-cff3-4b1c-b87f-07fc3186ae66"
+			"preview_database_id": "53e7b4bb-cff3-4b1c-b87f-07fc3186ae66",
+			"migrations_dir": "drizzle/migrations"
 		}
 	]
 	/**
