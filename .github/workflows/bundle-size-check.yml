@@ -1,5 +1,5 @@
-# bundle-size-check.yml — Build + mede gzip do entry cliente. Falha se > 200 KB (NFR3).
-# Story 1.5 expande pra Worker bundle 60%/80% + comentário no PR.
+# bundle-size-check.yml — Mede client gzip (NFR3 ≤ 200 KB) e Worker raw
+# (CF hard 10 MB, warn 60% / fail 80%). Posta comentário idempotente no PR.
 name: Bundle size check
 
 on:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: bundle-size-${{ github.workflow }}-${{ github.ref }}
@@ -32,5 +33,64 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Check bundle size
-        run: pnpm check:bundle-size
+      - name: Measure bundle size (JSON)
+        id: measure
+        run: pnpm check:bundle-size --json > size.json
+
+      - name: Upload size artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-size-${{ github.event.pull_request.number }}
+          path: size.json
+          retention-days: 30
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+
+            // size.json pode não existir se o build falhou antes do check.
+            let payload;
+            try {
+              payload = JSON.parse(fs.readFileSync('size.json', 'utf8'));
+            } catch (err) {
+              core.warning(`Sem size.json (build/check provavelmente falhou): ${err.message}`);
+              return;
+            }
+
+            const { client, worker, generatedAt } = payload;
+
+            const kb = (b) => `${(b / 1024).toFixed(2)} KB`;
+            const mb = (b) => `${(b / (1024 * 1024)).toFixed(2)} MB`;
+            const badge = (s) => s === 'ok' ? '✅' : s === 'warn' ? '⚠️' : '❌';
+
+            const body = [
+              '<!-- bundle-size-bot -->',
+              '### 📦 Bundle size',
+              '',
+              '| Bundle | File | Size | Limit | Status |',
+              '|---|---|---|---|---|',
+              `| Client (gzip) | \`${client.file}\` | ${kb(client.gzip)} | ${kb(client.limit)} | ${badge(client.status)} |`,
+              `| Worker (raw) | \`${worker.file}\` | ${mb(worker.raw)} (${(worker.percent * 100).toFixed(1)}%) | ${mb(worker.limit)} | ${badge(worker.status)} |`,
+              '',
+              '_Client mede gzip pra refletir download size (NFR3 ≤ 200 KB). Worker mede raw pra refletir o hard limit Cloudflare (warn 60% / fail 80% de 10 MB)._',
+              '',
+              `_Atualizado em ${generatedAt}_`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.data.find(
+              (c) => c.user?.type === 'Bot' && c.body?.includes('<!-- bundle-size-bot -->'),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
