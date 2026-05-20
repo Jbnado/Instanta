@@ -29,13 +29,21 @@
 			"migrations_dir": "drizzle/migrations"
 		}
 	],
+	"vars": {
+		"ENVIRONMENT": "production",
+		"ALLOWED_ORIGINS": "https://instanta.jbnado.dev"
+	},
 	"env": {
 		"preview": {
 			// PR previews via `wrangler deploy --env preview` (Story 1.4).
 			// Sem `d1_databases` aqui — bindings não herdam por env no Wrangler.
 			// Decisão: preview deploys são smoke do Worker/front; rotas que tocam DB
 			// vão falhar até criarmos `instanta-preview` D1 (story futura).
-			"name": "instanta-preview"
+			"name": "instanta-preview",
+			"vars": {
+				"ENVIRONMENT": "preview",
+				"ALLOWED_ORIGINS": "https://instanta-preview.workers.dev,https://instanta.jbnado.dev"
+			}
 		}
 	}
 	/**

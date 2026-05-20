@@ -4,6 +4,10 @@
 # Marca o ambiente. Em prod, este valor vem como env var no Worker.
 ENVIRONMENT=development
 
+# CSV de origins aceitas em CORS/CSRF. Em dev, normalmente só o Vite local.
+# Em prod vai por `vars.ALLOWED_ORIGINS` em wrangler.jsonc.
+ALLOWED_ORIGINS=http://localhost:5173
+
 # Adicione secrets locais aqui à medida que stories futuras (auth, Resend, Sentry) os introduzirem.
 # Exemplos (não usar valores reais):
 # RESEND_API_KEY=
