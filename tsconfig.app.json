@@ -28,7 +28,10 @@
 			"@/*": ["src/*"],
 			"@shared/*": ["src/shared/*"],
 			"@server/*": ["src/server/*"]
-		}
+		},
+
+		/* Types pros testes co-located (`*.test.tsx` em src/) */
+		"types": ["vite/client", "@testing-library/jest-dom"]
 	},
 	"include": ["src/react-app", "src/shared", "src/components", "src/lib", "src/hooks"]
 }
