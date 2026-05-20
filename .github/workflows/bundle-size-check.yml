@@ -1,0 +1,36 @@
+# bundle-size-check.yml — Build + mede gzip do entry cliente. Falha se > 200 KB (NFR3).
+# Story 1.5 expande pra Worker bundle 60%/80% + comentário no PR.
+name: Bundle size check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-size-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle-size:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Check bundle size
+        run: pnpm check:bundle-size

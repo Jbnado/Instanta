@@ -41,3 +41,59 @@ pnpm db:migrate:remote   # aplicar no D1 prod (após PR mergeado).
 D1 não tem transação cross-database nem replica. O Worker em prod e o Worker do PR de deploy compartilham o mesmo D1 — se a migration roda **antes** do deploy do código novo, requests antigos quebram; se roda **depois**, requests novos quebram. N-1 elimina essa janela ao garantir que **schema(N-1) é compatível com código(N)**.
 
 Quando o cap D1 ≥ 7 GB disparar (Story 1.12), a migração para Neon + Hyperdrive segue o mesmo padrão: dual-write D1↔Neon, switch reads, drop D1. Documentar essa transição aqui quando acontecer.
+
+## CI/CD: secrets e environments
+
+GitHub Actions roda 6 workflows em `.github/workflows/` (Story 1.4). Antes de o primeiro PR rodar, configure isto **uma vez**:
+
+### Secrets necessários
+
+| Nome | Onde achar | Usado em |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create Token** → template **"Edit Cloudflare Workers"** + adicionar permissões `Workers KV Storage:Edit`, `Account:D1:Edit` se preview consumir DB futuramente | `preview.yml`, `deploy.yml` |
+| `CLOUDFLARE_ACCOUNT_ID` | CF dashboard → sidebar direita "Account ID" (32 chars hex) | `preview.yml`, `deploy.yml` |
+
+Configurar via CLI:
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN --body "<paste-token>"
+gh secret set CLOUDFLARE_ACCOUNT_ID --body "<your-account-id>"
+```
+
+### Variable opcional (preview URL pretty)
+
+`CLOUDFLARE_WORKERS_SUBDOMAIN` (sem prefixo `secrets.`, fica em **Variables**): seu subdomain `*.workers.dev` (ex: `bernardo`). Usado em `preview.yml` pra comentar a URL completa do preview. Sem isso, o comentário usa placeholder.
+
+```bash
+gh variable set CLOUDFLARE_WORKERS_SUBDOMAIN --body "<seu-subdomain>"
+```
+
+### GitHub Environment `production` com approval gate
+
+`deploy.yml` referencia `environment: production`. Configure:
+
+1. Repo Settings → **Environments** → **New environment** → nome `production`.
+2. Marque **Required reviewers** e adicione **Bernardo** (você mesmo). Sem reviewer = sem gate.
+3. (Opcional) **Deployment branches** → only `main`. Evita deploy acidental de outras branches.
+
+Quando um push em main dispara `deploy.yml`, ele fica em "Waiting" até alguém aprovar via UI do Actions.
+
+### Verificar setup
+
+```bash
+# token funciona?
+pnpm dlx wrangler whoami
+
+# secrets configurados?
+gh secret list
+
+# workflows visíveis?
+gh workflow list
+```
+
+### Time budget
+
+- **PR** (ci + integration + bundle-size + preview): ≤ 8 min.
+- **main** (ci + integration + e2e + deploy): ≤ 15 min (deploy bloqueado por approval, conta após aprovar).
+
+Se ultrapassar, suspeitar de cache pnpm não hidratado (primeiro run sempre mais lento) ou Playwright install sem cache (Story 1.4 não cacheia browsers — adicionar em 1.5 se virar dor).

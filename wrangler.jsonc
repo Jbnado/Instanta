@@ -28,7 +28,16 @@
 			"preview_database_id": "53e7b4bb-cff3-4b1c-b87f-07fc3186ae66",
 			"migrations_dir": "drizzle/migrations"
 		}
-	]
+	],
+	"env": {
+		"preview": {
+			// PR previews via `wrangler deploy --env preview` (Story 1.4).
+			// Sem `d1_databases` aqui — bindings não herdam por env no Wrangler.
+			// Decisão: preview deploys são smoke do Worker/front; rotas que tocam DB
+			// vão falhar até criarmos `instanta-preview` D1 (story futura).
+			"name": "instanta-preview"
+		}
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

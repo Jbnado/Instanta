@@ -1,0 +1,39 @@
+# integration.yml — Vitest workers project (workerd + D1 isolado via vitest-pool-workers).
+# Inclui sanity check `db:generate` pra detectar schema TS divergindo do SQL migration.
+# Roda em PR e push em main. Parte do orçamento PR ≤ 8 min.
+name: Integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Drizzle generate (sanity check — schema TS vs SQL migration)
+        run: pnpm db:generate
+
+      - name: Vitest (workers project)
+        run: pnpm test:workers

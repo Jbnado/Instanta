@@ -1,0 +1,65 @@
+# preview.yml — Deploy Worker preview (`instanta-preview`) e comenta URL no PR.
+# Sem D1: bindings não herdam por env no Wrangler; endpoints que tocam DB falham em preview.
+name: Preview deploy
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Deploy to Cloudflare (preview env)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env preview
+
+      - name: Comment preview URL on PR
+        uses: actions/github-script@v7
+        env:
+          ACCOUNT_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+        with:
+          script: |
+            const subdomain = process.env.ACCOUNT_SUBDOMAIN;
+            const url = subdomain
+              ? `https://instanta-preview.${subdomain}.workers.dev`
+              : `https://instanta-preview.<your-account>.workers.dev`;
+            const body = [
+              `### Preview deploy — Worker \`instanta-preview\``,
+              ``,
+              `🚀 ${url}`,
+              ``,
+              `_Sem D1 binding em preview — endpoints que tocam DB vão falhar. Front + Worker handlers puros funcionam._`,
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
