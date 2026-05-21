@@ -193,3 +193,99 @@ Stories de form futuras aplicarão. Padrão:
 <input data-clarity-mask type="email" name="email" />
 <div data-clarity-mask>{user.email}</div>
 ```
+
+## Domain DNS + Email Auth
+
+`instanta.jbnado.dev` é o subdomínio prod (Bernardo possui `jbnado.dev`). Email transacional via Resend com sender `noreply@instanta.jbnado.dev`. NFR44 exige SPF + DKIM + DMARC válidos.
+
+### Passo 1 — DNS provider
+
+Duas opções, escolha **uma**:
+
+**Opção A — migrar zona inteira `jbnado.dev` pra Cloudflare DNS** (recomendado se você não tem amarração com Vercel DNS):
+- CF Dashboard → Add Site → `jbnado.dev` → CF mostra os 2 nameservers a configurar no registrar.
+- No registrar do `jbnado.dev`, trocar nameservers pros da CF.
+- Vercel (portfolio em `jbnado.dev`) continua funcionando — você cria CNAME/A no CF apontando pro Vercel.
+- Propagação DNS: 5min-24h.
+
+**Opção B — manter zona no Vercel, expor só subdomínio via CNAME**:
+- No Vercel DNS panel, criar CNAME `instanta.jbnado.dev` → `<seu-worker>.<account>.workers.dev`.
+- TXT records SPF/DKIM/DMARC ainda ficam no Vercel DNS.
+- Mais simples se zona Vercel está cheia de outras configs.
+
+### Passo 2 — Cloudflare Worker custom domain
+
+Após zona DNS no CF (opção A) ou registro CNAME no Vercel (opção B):
+
+- CF Dashboard → Workers & Pages → `instanta` → Settings → **Domains** → Add Custom Domain → `instanta.jbnado.dev`.
+- CF provisiona TLS cert automático (Let's Encrypt). Aguarda alguns minutos.
+
+`wrangler.jsonc` já tem `routes: [{ pattern: "instanta.jbnado.dev", custom_domain: true }]`. `wrangler deploy --env=""` em prod usa esse routing.
+
+### Passo 3 — Conta Resend
+
+- Criar conta em [resend.com](https://resend.com).
+- Domains → **Add Domain** → `instanta.jbnado.dev`.
+- Resend mostra **2 TXT records** a adicionar no DNS:
+  - SPF (hostname `instanta.jbnado.dev` ou `@`).
+  - DKIM (hostname `resend._domainkey.instanta.jbnado.dev` ou `resend._domainkey`).
+
+### Passo 4 — TXT records no DNS
+
+Adicionar no CF DNS (opção A) ou Vercel DNS (opção B):
+
+| Type | Name | Value |
+|---|---|---|
+| TXT | `instanta.jbnado.dev` (ou `instanta`) | `v=spf1 include:_spf.resend.com -all` |
+| TXT | `resend._domainkey.instanta.jbnado.dev` (ou `resend._domainkey.instanta`) | (valor do Resend dashboard — chave pública longa) |
+| TXT | `_dmarc.instanta.jbnado.dev` (ou `_dmarc.instanta`) | `v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@jbnado.dev; fo=1` |
+
+**DMARC mailbox**: o `rua=` é opcional mas valida o setup. Criar mailbox `dmarc-reports@jbnado.dev` (Resend ou Gmail) ou trocar pro seu email pessoal. Sem `rua=` válido, ainda passa pelo `verify:domain` desde que tenha `p=` e `v=DMARC1`.
+
+### Passo 5 — Verificar propagação
+
+```bash
+# Em instanta/
+pnpm verify:domain
+
+# Forçar resolver CF (bypass cache do ISP/sistema)
+pnpm verify:domain --server=1.1.1.1
+```
+
+Saída esperada após propagação:
+```
+SPF    ✓ SPF Resend OK
+DKIM   ✓ 1 record(s)
+DMARC  ✓ DMARC quarantine/reject + rua OK
+```
+
+### Passo 6 — Resend marca como Verified
+
+No dashboard Resend, o domínio passa de "Pending" pra **Verified**. Sem isso, envios são bloqueados.
+
+### Passo 7 — Wrangler secret RESEND_API_KEY
+
+Resend → API Keys → Create → escopo "Send emails" → copiar.
+
+```bash
+pnpm dlx wrangler secret put RESEND_API_KEY --env=""
+# Cola a key quando solicitado.
+```
+
+Stories futuras de email (reset de senha, ativação de evento, alertas LGPD) consomem `env.RESEND_API_KEY`.
+
+### DMARC: subir pra reject após 30 dias
+
+Comece em `p=quarantine` (emails legítimos vão pra spam se config quebrar). Após 30 dias sem reports estranhos, subir pra `p=reject` (negação dura). Editar TXT `_dmarc.instanta.jbnado.dev` no DNS.
+
+### HSTS preload submission (decisão pendente)
+
+NFR14 pede submeter `jbnado.dev` à HSTS preload list ([hstspreload.org](https://hstspreload.org)). Isso obriga **`includeSubDomains`** no apex — todos os subdomínios do `jbnado.dev` (portfolio Vercel + futuros) precisam servir HTTPS válido com cert.
+
+- **Submeter no apex** se você está confortável com o lock-in (reversão leva meses).
+- **Submeter só em `instanta.jbnado.dev`** se quer escopo restrito (HSTS preload na zona específica).
+- **Adiar**: header HSTS já está sendo emitido (Story 1.6); preload é "force HTTPS antes mesmo do primeiro request". Não bloqueia produção.
+
+### Custom domain em dev?
+
+`pnpm dev` continua em `http://localhost:5173`. Não bate em `instanta.jbnado.dev`. CSP/CORS dev usa allowlist `localhost:5173` configurada em `.dev.vars`.

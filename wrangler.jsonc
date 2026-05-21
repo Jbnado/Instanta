@@ -18,6 +18,12 @@
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application"
 	},
+	"routes": [
+		{
+			"pattern": "instanta.jbnado.dev",
+			"custom_domain": true
+		}
+	],
 	"version_metadata": {
 		"binding": "CF_VERSION_METADATA"
 	},
