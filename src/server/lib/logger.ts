@@ -1,6 +1,8 @@
+import { captureException, isSentryInitialized } from "./sentry";
+
 // Logger estruturado. Emite JSON via console pra capturar em Workers Logs.
+// `error()` opcionalmente integra com Sentry quando o wrapper inicializou (prod + DSN).
 // Sem PII em texto plano (NFR25) é responsabilidade do caller — logger só serializa.
-// Será expandido na Story 1.9 (Sentry integration para errors críticos).
 
 type LogPayload = Record<string, unknown> & { event: string };
 
@@ -14,5 +16,10 @@ function emit(level: "info" | "warn" | "error", payload: LogPayload): void {
 export const logger = {
 	info: (payload: LogPayload) => emit("info", payload),
 	warn: (payload: LogPayload) => emit("warn", payload),
-	error: (payload: LogPayload) => emit("error", payload),
+	error: (payload: LogPayload, err?: Error) => {
+		emit("error", payload);
+		if (isSentryInitialized()) {
+			captureException(err ?? new Error(payload.event), payload);
+		}
+	},
 };

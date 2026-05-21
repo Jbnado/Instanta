@@ -8,8 +8,11 @@ ENVIRONMENT=development
 # Em prod vai por `vars.ALLOWED_ORIGINS` em wrangler.jsonc.
 ALLOWED_ORIGINS=http://localhost:5173
 
-# Adicione secrets locais aqui à medida que stories futuras (auth, Resend, Sentry) os introduzirem.
+# Sentry DSN. Em dev local fica vazio (Sentry no-op). Em prod, configurar via
+# `pnpm dlx wrangler secret put SENTRY_DSN`.
+SENTRY_DSN=
+
+# Adicione secrets locais aqui à medida que stories futuras (auth, Resend) os introduzirem.
 # Exemplos (não usar valores reais):
 # RESEND_API_KEY=
 # SESSION_SECRET=
-# SENTRY_DSN=

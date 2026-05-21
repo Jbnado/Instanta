@@ -128,3 +128,63 @@ Logs no terminal A mostram `cron.<name>.started` + `cron.<name>.completed`.
 
 - **production** — todos os 4 crons rodam.
 - **preview** — **sem cron** (omitido em `env.preview.triggers`). Evita disparos no Worker `instanta-preview` por PRs vivos.
+
+## Observability (Sentry + Microsoft Clarity)
+
+**Story 1.9 = env-gated (prod-only).** Dev local e PR previews não carregam Sentry nem Clarity — não poluem dashboards nem queimam quota.
+
+### Sentry (errors no Worker)
+
+1. Criar projeto no [sentry.io](https://sentry.io) → tipo "Cloudflare Workers".
+2. Copiar o DSN gerado.
+3. Configurar como Wrangler secret em **prod**:
+   ```bash
+   pnpm dlx wrangler secret put SENTRY_DSN
+   # Cola o DSN quando solicitado.
+   ```
+4. Verificar com `pnpm dlx wrangler secret list`.
+
+Em dev local, `SENTRY_DSN` fica vazio em `.dev.vars` → Sentry vira no-op. Em preview, omitimos intencionalmente (a env `preview` não declara `version_metadata` nem aceita o secret).
+
+**Release tagging:** `version_metadata` binding (gratuito) expõe `env.CF_VERSION_METADATA.id` que Sentry usa como release tag. Sem config adicional.
+
+**Sampling:** `sampleRate: 1` (100% errors), `tracesSampleRate: 0` (sem performance traces no MVP — queimam quota free tier). Ajustar quando perf debugging for necessário.
+
+**Como capturar um error customizado:**
+```ts
+import { logger } from "@server/lib/logger";
+
+try {
+  await riskyOp();
+} catch (err) {
+  logger.error({ event: "feature.failed", userId: user.id }, err);
+  // Logger emite JSON local + Sentry.captureException se inicializado.
+}
+```
+
+### Microsoft Clarity (session replay frontend)
+
+1. Criar projeto em [clarity.microsoft.com](https://clarity.microsoft.com).
+2. Copiar o project ID (alfanumérico curto, ex: `abc123xyz`).
+3. Definir como GH variable (não secret — IDs Clarity são públicos):
+   ```bash
+   gh variable set VITE_CLARITY_PROJECT_ID --body "<seu-project-id>"
+   ```
+4. Atualizar `deploy.yml` pra exportar o ID no step de build:
+   ```yaml
+   - name: Build
+     run: pnpm build
+     env:
+       VITE_CLARITY_PROJECT_ID: ${{ vars.VITE_CLARITY_PROJECT_ID }}
+   ```
+   *(pendente — adicionar quando o ID existir; sem `env`, build prod ainda funciona sem Clarity.)*
+
+Em dev local (`pnpm dev`), `import.meta.env.PROD === false` → Clarity nunca carrega.
+
+**Convenção `data-clarity-mask`:** forms e elementos com PII (email de outros usuários, senha, MFA codes, conteúdo de fotos no DOM, qualquer ID pessoal) **devem** receber `data-clarity-mask` no input/container. Clarity respeita nativamente — replay mostra placeholder em vez do conteúdo.
+
+Stories de form futuras aplicarão. Padrão:
+```tsx
+<input data-clarity-mask type="email" name="email" />
+<div data-clarity-mask>{user.email}</div>
+```
