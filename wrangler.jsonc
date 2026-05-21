@@ -18,6 +18,15 @@
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application"
 	},
+	"triggers": {
+		// UTC. Veja `docs/runbook.md` § Cron Triggers pra tabela com horário em BRT.
+		"crons": [
+			"0 3 * * *",   // auto-clean-d30 (diário 03:00 UTC = 00:00 BRT)
+			"0 4 * * 0",   // audit-log-purge (domingo 04:00 UTC)
+			"0 5 * * *",   // backup-d1 (diário 05:00 UTC = 02:00 BRT)
+			"*/15 * * * *" // alert-monitor (15min)
+		]
+	},
 	"durable_objects": {
 		"bindings": [
 			{

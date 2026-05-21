@@ -97,3 +97,34 @@ gh workflow list
 - **main** (ci + integration + e2e + deploy): ≤ 15 min (deploy bloqueado por approval, conta após aprovar).
 
 Se ultrapassar, suspeitar de cache pnpm não hidratado (primeiro run sempre mais lento) ou Playwright install sem cache (Story 1.4 não cacheia browsers — adicionar em 1.5 se virar dor).
+
+## Cron Triggers
+
+`src/server/scheduled.ts` despacha por `controller.cron`. Cron strings sempre em UTC (CF não suporta TZ). BR = UTC-3.
+
+| Cron (UTC) | UTC | BRT | Handler | Finalidade |
+|---|---|---|---|---|
+| `0 3 * * *` | diário 03:00 | 00:00 | `auto-clean-d30` | DELETE photos com event.ended_at < now-30d (NFR21+NFR27); idempotente |
+| `0 4 * * 0` | domingo 04:00 | sáb 01:00 | `audit-log-purge` | DELETE audit_log onde created_at < now-12meses (NFR46) |
+| `0 5 * * *` | diário 05:00 | 02:00 | `backup-d1` | `wrangler d1 export` → R2 (NFR29, retenção 7 dias) |
+| `*/15 * * * *` | a cada 15min | — | `alert-monitor` | spike detection auth/cap/D1 size/auto-clean failures (NFR61) |
+
+**Story 1.8 = scaffold no-op.** Handlers só logam started/completed; cada feature substitui o no-op na sua story (4.x photo pipeline, 1.12 monitoring, etc.).
+
+### Disparar local
+
+```bash
+# Terminal A: sobe wrangler dev com scheduled habilitado
+pnpm wrangler dev --test-scheduled
+
+# Terminal B: dispara um cron manualmente
+curl "http://localhost:8787/__scheduled?cron=0+3+*+*+*"
+# Encode espaço como `+`. Use o cron exato registrado em wrangler.jsonc.
+```
+
+Logs no terminal A mostram `cron.<name>.started` + `cron.<name>.completed`.
+
+### Ambientes que disparam cron
+
+- **production** — todos os 4 crons rodam.
+- **preview** — **sem cron** (omitido em `env.preview.triggers`). Evita disparos no Worker `instanta-preview` por PRs vivos.
