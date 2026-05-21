@@ -137,12 +137,17 @@ Logs no terminal A mostram `cron.<name>.started` + `cron.<name>.completed`.
 
 1. Criar projeto no [sentry.io](https://sentry.io) → tipo "Cloudflare Workers".
 2. Copiar o DSN gerado.
-3. Configurar como Wrangler secret em **prod**:
+3. Configurar como Wrangler secret no env **top-level** (prod). O `wrangler.jsonc` declara `env.preview`, então o CLI exige passar `--env` explícito pra evitar ambiguidade:
    ```bash
-   pnpm dlx wrangler secret put SENTRY_DSN
+   pnpm dlx wrangler secret put SENTRY_DSN --env=""
+   # `--env=""` (string vazia) = env top-level (Worker `instanta`).
    # Cola o DSN quando solicitado.
    ```
-4. Verificar com `pnpm dlx wrangler secret list`.
+   Pra setar no Worker preview (raro — preview é Sentry no-op por design):
+   ```bash
+   pnpm dlx wrangler secret put SENTRY_DSN --env=preview
+   ```
+4. Verificar: `pnpm dlx wrangler secret list --env=""` (e `--env=preview` se setou lá).
 
 Em dev local, `SENTRY_DSN` fica vazio em `.dev.vars` → Sentry vira no-op. Em preview, omitimos intencionalmente (a env `preview` não declara `version_metadata` nem aceita o secret).
 
