@@ -27,6 +27,12 @@
 	"version_metadata": {
 		"binding": "CF_VERSION_METADATA"
 	},
+	"analytics_engine_datasets": [
+		{
+			"binding": "ANALYTICS",
+			"dataset": "instanta_events"
+		}
+	],
 	"triggers": {
 		// UTC. Veja `docs/runbook.md` § Cron Triggers pra tabela com horário em BRT.
 		"crons": [

@@ -396,6 +396,59 @@ pnpm wrangler d1 execute instanta-dev --remote --command "SELECT (SELECT page_co
 
 Pra o alerta entregar email, Resend precisa estar configurado (Story 1.11 — pendência manual). Sem `RESEND_API_KEY`, o cron ainda roda + loga `cron.d1-monitor.threshold-exceeded` em Workers Logs, mas email é skipped (warn `email.skipped.no-key`).
 
+## Telemetria (FR74 + Success Criteria)
+
+Dois canais complementares:
+
+**1. Workers Logs (debug + auditoria)** via `logger.event(name, payload)`:
+- Emite JSON com `level: "event"` + nome dot-separated do evento + payload arbitrário.
+- Persistente em Workers Logs (CF Dashboard → seu Worker → Logs).
+- Pesquisável por string; bom pra debug retroativo e auditoria operacional.
+
+**2. Workers Analytics Engine (agregações SQL)** via `trackEvent(env, { name, indexes, doubles, blobs })`:
+- Persistente em dataset SQL (`instanta_events`) queryable via Analytics Engine SQL API.
+- Bom pra dashboards de métricas, agregações temporais, custos.
+- CF limits: 1 index por data point, até 20 doubles, até 20 blobs (5120 bytes total).
+
+Stories de feature **idealmente chamam ambos** (Workers Logs + Analytics Engine) — Logs serve debug, Analytics serve dashboards.
+
+### Eventos planejados (Success Criteria + FR74)
+
+| Event name | Quando | Indexes/doubles/blobs sugeridos |
+|---|---|---|
+| `event.created` | Anfitrião cria evento | indexes: name, blobs: [eventId, hashedUserId] |
+| `event.activated` | Admin ativa evento (FR53) | blobs: [eventId], doubles: [latencyMsFromCreation] |
+| `event.with_5_photos` | Evento atinge 5 fotos | blobs: [eventId] |
+| `photo.uploaded` | Convidado completa upload | blobs: [eventId, hashedUserId], doubles: [bytes, durationMs] |
+| `photo.feed_visible` | Foto aparece no feed | blobs: [eventId, photoId], doubles: [latencyMsFromUploadToVisible] |
+| `guest.posted_first_photo` | 1ª foto de um convidado num evento | blobs: [eventId, hashedUserId] |
+| `host.returning` | Anfitrião cria 2º+ evento em 90d | blobs: [hashedUserId] |
+| `latency.upload_to_telao_p95` | (calculado em job) | doubles: [p95Ms] |
+| `cost.cf_images_per_event` | (calculado em job, batch) | blobs: [eventId], doubles: [costBRL] |
+| `download.zip_completed` | Anfitrião baixa pacote | blobs: [eventId], doubles: [photoCount, sizeBytes, durationMs] |
+| `admin.activation_latency` | Admin ativa evento | doubles: [hoursFromSignupToActivation] |
+
+### Privacidade (NFR25)
+
+- **Email, senha, conteúdo de foto NUNCA** como blob em texto plano.
+- **userId** sempre como `sha256(userId).slice(0, 16)` ("hashedUserId" nas tabelas acima).
+- **eventId, photoId** podem ir em plaintext (UUIDs públicos, não revelam PII).
+- Quando dúvida: hashar.
+
+### Como consultar Analytics Engine
+
+```bash
+# CF Dashboard → Workers & Pages → instanta → Analytics → Analytics Engine
+# OU via SQL API (curl com CF API token + Analytics:Read):
+curl -X POST https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/analytics_engine/sql \
+  -H "Authorization: Bearer <CF_API_TOKEN>" \
+  -d "SELECT index1, COUNT() FROM instanta_events WHERE timestamp > NOW() - INTERVAL '7' DAY GROUP BY index1"
+```
+
+### Sampling
+
+Sem sampling no MVP (volume baixo). Adicionar quando passar de ~100k events/dia (limite Analytics Engine free tier).
+
 ### Limitação atual: PRAGMA bloqueado em runtime
 
 D1 runtime bloqueia `PRAGMA page_count` com erro `SQLITE_AUTH`. O handler `d1Monitor` tenta a query, captura o erro, e loga `cron.d1-monitor.pragma-blocked` — sem alertar size real até CF habilitar PRAGMA ou trocarmos pra outra solução.
