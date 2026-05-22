@@ -33,6 +33,7 @@
 			"0 3 * * *",   // auto-clean-d30 (diário 03:00 UTC = 00:00 BRT)
 			"0 4 * * 0",   // audit-log-purge (domingo 04:00 UTC)
 			"0 5 * * *",   // backup-d1 (diário 05:00 UTC = 02:00 BRT)
+			"0 6 * * 1",   // d1-monitor (segunda 06:00 UTC = 03:00 BRT — B-001)
 			"*/15 * * * *" // alert-monitor (15min)
 		]
 	},
@@ -63,7 +64,8 @@
 	],
 	"vars": {
 		"ENVIRONMENT": "production",
-		"ALLOWED_ORIGINS": "https://instanta.jbnado.dev"
+		"ALLOWED_ORIGINS": "https://instanta.jbnado.dev",
+		"ADMIN_EMAIL": "bernardojoao9@gmail.com"
 	},
 	"env": {
 		"preview": {
@@ -74,7 +76,8 @@
 			"name": "instanta-preview",
 			"vars": {
 				"ENVIRONMENT": "preview",
-				"ALLOWED_ORIGINS": "https://instanta-preview.workers.dev,https://instanta.jbnado.dev"
+				"ALLOWED_ORIGINS": "https://instanta-preview.workers.dev,https://instanta.jbnado.dev",
+				"ADMIN_EMAIL": "bernardojoao9@gmail.com"
 			}
 		}
 	}

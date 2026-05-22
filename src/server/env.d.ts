@@ -5,6 +5,7 @@ declare global {
 	namespace Cloudflare {
 		interface Env {
 			SENTRY_DSN?: string;
+			RESEND_API_KEY?: string;
 		}
 	}
 }

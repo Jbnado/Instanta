@@ -40,7 +40,70 @@ pnpm db:migrate:remote   # aplicar no D1 prod (após PR mergeado).
 
 D1 não tem transação cross-database nem replica. O Worker em prod e o Worker do PR de deploy compartilham o mesmo D1 — se a migration roda **antes** do deploy do código novo, requests antigos quebram; se roda **depois**, requests novos quebram. N-1 elimina essa janela ao garantir que **schema(N-1) é compatível com código(N)**.
 
-Quando o cap D1 ≥ 7 GB disparar (Story 1.12), a migração para Neon + Hyperdrive segue o mesmo padrão: dual-write D1↔Neon, switch reads, drop D1. Documentar essa transição aqui quando acontecer.
+Quando o cap D1 ≥ 7 GB disparar, a migração para Neon + Hyperdrive segue o mesmo padrão: dual-write D1↔Neon, switch reads, drop D1. Veja § D1 GB monitoring abaixo.
+
+### PR checklist por migration destrutiva
+
+Cole no descritivo do PR que toca schema destrutivo:
+
+```
+### Migração destrutiva — checklist N-1
+
+- [ ] Confirmei que a mudança é destrutiva (drop/rename/type/NOT NULL).
+- [ ] PR-1 (Expand) — esta PR adiciona estrutura nova **nullable** sem remover antiga.
+- [ ] Schema TS em src/server/db/schema.ts editado.
+- [ ] `pnpm db:generate` rodado; migration NNNN_*.sql revisada.
+- [ ] `pnpm db:migrate:local` rodado e smoke tests passam.
+- [ ] Plano de PR-2 (switch reads + backfill) documentado nesta description.
+- [ ] Plano de PR-3 (contract — drop antiga) documentado, com ETA realista (≥1 release de janela).
+- [ ] Verifiquei que `pnpm fr:check` não reclama de FRs `implemented` que tocam o schema antigo.
+- [ ] Backup mental: o que acontece se PR-1 deployar mas PR-2 nunca for mergeada? Sistema continua funcionando? (Resposta esperada: sim, código novo escreve em ambos; reads do antigo.)
+- [ ] Anotei no runbook se a migração inclui dados que devem ser excluídos por LGPD/auto-clean.
+```
+
+### Exemplo — rename column `users.display_name` → `users.profile_name`
+
+```
+PR-1 (Expand):
+  ALTER TABLE users ADD COLUMN profile_name TEXT;
+  -- código novo escreve em ambas (display_name + profile_name) em qualquer UPDATE/INSERT.
+
+PR-2 (Switch reads + backfill):
+  -- Job idempotente:
+  UPDATE users SET profile_name = display_name WHERE profile_name IS NULL;
+  -- código novo lê só profile_name.
+  -- código antigo ainda funciona (escreve em ambas).
+
+PR-3 (Contract):
+  ALTER TABLE users DROP COLUMN display_name;
+  -- remove dual-write do código novo. Deploy.
+```
+
+### Exemplo — drop column `events.legacy_qr_token`
+
+```
+PR-1 (Expand): nada faz no DB. Código novo para de gravar em legacy_qr_token.
+PR-2 (Switch reads + verify): código novo para de ler. Wait release.
+PR-3 (Contract):
+  ALTER TABLE events DROP COLUMN legacy_qr_token;
+```
+
+### Exemplo — add NOT NULL retroativo em `users.email`
+
+SQLite não suporta `ALTER COLUMN ... NOT NULL` direto. Precisa tabela-shadow:
+
+```
+PR-1 (Expand): nada no DB. Código novo valida que email é não-null em INSERT (camada app).
+PR-2 (Backfill):
+  -- popular emails faltantes (algum default, ou exigir update via campanha).
+  UPDATE users SET email = 'unknown_' || id || '@instanta.dev' WHERE email IS NULL;
+PR-3 (Contract — shadow table):
+  CREATE TABLE users_new (id TEXT PRIMARY KEY, email TEXT NOT NULL, ...);
+  INSERT INTO users_new SELECT id, email, ... FROM users;
+  DROP TABLE users;
+  ALTER TABLE users_new RENAME TO users;
+  -- recriar índices.
+```
 
 ## CI/CD: secrets e environments
 
@@ -289,3 +352,64 @@ NFR14 pede submeter `jbnado.dev` à HSTS preload list ([hstspreload.org](https:/
 ### Custom domain em dev?
 
 `pnpm dev` continua em `http://localhost:5173`. Não bate em `instanta.jbnado.dev`. CSP/CORS dev usa allowlist `localhost:5173` configurada em `.dev.vars`.
+
+## D1 GB monitoring (B-001)
+
+D1 tem **hard cap 10 GB** por database (NFR41 + B-001). Sem visibilidade, features quebram silenciosamente quando bater. Cron `d1-monitor` (semanal, `0 6 * * 1` = segunda 03:00 BRT) calcula tamanho via SQLite pragmas e dispara email admin via Resend se ≥ 7 GB.
+
+### Quando você recebe o alerta
+
+Você vai receber email com assunto **`[Instanta] D1 ≥ 7 GB (X.XX GB)`** em `bernardojoao9@gmail.com` (configurado em `wrangler.jsonc vars.ADMIN_EMAIL`).
+
+**Não panique** — você ainda tem 3 GB de buffer antes de quebrar.
+
+### Opções de ação (do mais rápido pro mais drástico)
+
+1. **Acelerar auto-clean D+30** — reduzir janela para D+15 ou D+7 temporariamente. Edit `src/server/scheduled.ts.autoCleanD30` (quando implementado, Story 4.x). Recupera 30-50% rápido se houver eventos encerrados antigos cheios de fotos.
+
+2. **Investigar `audit_log`** — ele cresce monotonicamente até a purge semanal. Se ele estiver muito grande, considere reduzir retenção (NFR46 manda 12 meses; cortar pra 6 meses é trade-off de compliance).
+
+3. **Migrar `audit_log` pra Neon primeiro** (hot table strategy) — move só ele pra Postgres, mantém resto em D1. Reduz pressão sem migração total. Veja [[adr/0003-d1-vs-neon]] § "Gatilho 2".
+
+4. **Migrar tudo pra Neon+Hyperdrive** — ADR 0003 documenta o ciclo expand-contract. Drizzle agnóstico facilita; ~1 sprint pra fazer dual-write → switch reads → drop D1.
+
+### Thresholds
+
+| Nível | Tamanho | Ação |
+|---|---|---|
+| OK | < 7 GB | Nada. Continue monitorando. |
+| Warning | ≥ 7 GB | Email admin dispara semanalmente. Investigue + planeje migração. |
+| Crítico | ≥ 9 GB | (Não automatizado) Migração de emergência ou kill auto-clean pra reduzir hoje. |
+| Hard cap | 10 GB | D1 rejeita writes. Sistema quebra. |
+
+### Verificar tamanho manualmente
+
+```bash
+# Local (dev D1)
+pnpm wrangler d1 execute instanta-dev --local --command "SELECT (SELECT page_count FROM pragma_page_count) * (SELECT page_size FROM pragma_page_size) AS bytes"
+
+# Remote (prod D1)
+pnpm wrangler d1 execute instanta-dev --remote --command "SELECT (SELECT page_count FROM pragma_page_count) * (SELECT page_size FROM pragma_page_size) AS bytes" --env=""
+```
+
+### Pendência operacional
+
+Pra o alerta entregar email, Resend precisa estar configurado (Story 1.11 — pendência manual). Sem `RESEND_API_KEY`, o cron ainda roda + loga `cron.d1-monitor.threshold-exceeded` em Workers Logs, mas email é skipped (warn `email.skipped.no-key`).
+
+### Limitação atual: PRAGMA bloqueado em runtime
+
+D1 runtime bloqueia `PRAGMA page_count` com erro `SQLITE_AUTH`. O handler `d1Monitor` tenta a query, captura o erro, e loga `cron.d1-monitor.pragma-blocked` — sem alertar size real até CF habilitar PRAGMA ou trocarmos pra outra solução.
+
+**Workaround pendente** (não implementado): usar [Cloudflare D1 REST API](https://developers.cloudflare.com/api/operations/cloudflare-d1-get-database) endpoint `GET /accounts/{account_id}/d1/database/{database_id}` que retorna `result.file_size`. Requer:
+
+- Secret `CF_API_TOKEN` com permissão `D1:Read` (separado do CLOUDFLARE_API_TOKEN do CI).
+- `CF_ACCOUNT_ID` + `CF_D1_DATABASE_ID` como vars.
+- Substituir o `prepare("PRAGMA ...")` por `fetch("https://api.cloudflare.com/...")` em `src/server/scheduled.ts:d1Monitor`.
+
+Implementar quando D1 size virar dor real (provavelmente pós-soft-launch). Por ora, **monitore manualmente** via:
+
+```bash
+pnpm dlx wrangler d1 info instanta-dev --env=""
+```
+
+Mostra `file_size` no JSON output. Rode mensalmente.

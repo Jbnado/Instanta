@@ -1,8 +1,11 @@
+import { sendAdminAlert } from "./lib/email";
 import { logger } from "./lib/logger";
 
 // Story 1.8 scaffold: cada handler é no-op com logging started/completed.
-// Stories de feature (4.x photo pipeline, 1.12 D1 monitoring, etc.) substituem
-// o no-op pela implementação real, mantendo a estrutura `scheduled.ts` única.
+// Story 1.12 implementou d1Monitor (real). Demais stories de feature
+// (4.x photo pipeline, moderation, backup) substituem o no-op no devido tempo.
+
+const D1_ALERT_THRESHOLD_BYTES = 7 * 1024 * 1024 * 1024; // 7 GB — 70% do hard cap 10 GB.
 
 async function autoCleanD30(_env: Env, _ctx: ExecutionContext): Promise<void> {
 	logger.info({ event: "cron.auto-clean-d30.started" });
@@ -19,20 +22,71 @@ async function auditLogPurge(_env: Env, _ctx: ExecutionContext): Promise<void> {
 
 async function backupD1(_env: Env, _ctx: ExecutionContext): Promise<void> {
 	logger.info({ event: "cron.backup-d1.started" });
-	// TODO Story 1.12+: wrangler d1 export → R2 (NFR29 backup diário, retenção 7 dias).
+	// TODO Story dedicada: wrangler d1 export → R2 (NFR29 backup diário, retenção 7 dias).
 	logger.info({ event: "cron.backup-d1.completed" });
 }
 
 async function alertMonitor(_env: Env, _ctx: ExecutionContext): Promise<void> {
 	logger.info({ event: "cron.alert-monitor.started" });
-	// TODO Story 1.12: spike detection auth failures + cap + D1 ≥7GB + auto-clean failures.
+	// TODO Stories futuras: spike detection auth failures + cap + auto-clean failures.
+	// D1 size foi pro d1-monitor (semanal); aqui ficam métricas 15min.
 	logger.info({ event: "cron.alert-monitor.completed" });
+}
+
+// Story 1.12 (B-001): check semanal de tamanho D1 via SQLite pragmas. Se >=7 GB,
+// envia email admin via Resend pra avaliar migração pra Neon+Hyperdrive
+// (veja docs/adr/0003-d1-vs-neon.md + runbook § D1 GB monitoring).
+async function d1Monitor(env: Env, _ctx: ExecutionContext): Promise<void> {
+	logger.info({ event: "cron.d1-monitor.started" });
+	if (!env.DB) {
+		logger.warn({ event: "cron.d1-monitor.skipped.no-db" });
+		return;
+	}
+	// D1 runtime bloqueia PRAGMA (SQLITE_AUTH). Tentamos mesmo assim — se um dia
+	// CF habilitar, alerta passa a funcionar nativamente. Catch silencia, e
+	// log warn aponta pra runbook (Bernardo pode trocar pra CF REST API com token).
+	let bytes = 0;
+	try {
+		const pageCount = await env.DB.prepare("PRAGMA page_count").first<{ page_count: number }>();
+		const pageSize = await env.DB.prepare("PRAGMA page_size").first<{ page_size: number }>();
+		bytes = (pageCount?.page_count ?? 0) * (pageSize?.page_size ?? 0);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		logger.warn({
+			event: "cron.d1-monitor.pragma-blocked",
+			error: msg,
+			hint: "D1 runtime bloqueia PRAGMA. Use CF REST API + CF_API_TOKEN (runbook § D1 GB monitoring) quando virar dor.",
+		});
+		logger.info({ event: "cron.d1-monitor.completed" });
+		return;
+	}
+
+	const gb = bytes / (1024 * 1024 * 1024);
+	logger.info({ event: "cron.d1-monitor.size", bytes, gb: Number(gb.toFixed(3)) });
+
+	if (bytes >= D1_ALERT_THRESHOLD_BYTES) {
+		const subject = `[Instanta] D1 ≥ 7 GB (${gb.toFixed(2)} GB)`;
+		const body = [
+			`D1 atingiu ${gb.toFixed(2)} GB de uso (threshold 7 GB / hard cap 10 GB).`,
+			"",
+			"Opções de ação documentadas em docs/runbook.md § D1 GB monitoring:",
+			"  1. Acelerar auto-clean D+30 (reduzir janela ou rodar manualmente).",
+			"  2. Migrar audit_log primeiro pra Neon (hot table específica).",
+			"  3. Migrar TUDO pra Neon+Hyperdrive (ADR 0003).",
+			"",
+			"Threshold rodado semanalmente (cron `0 6 * * 1`).",
+		].join("\n");
+		logger.warn({ event: "cron.d1-monitor.threshold-exceeded", bytes, gb });
+		await sendAdminAlert(env, { subject, body });
+	}
+	logger.info({ event: "cron.d1-monitor.completed" });
 }
 
 const CRON_TO_HANDLER: Record<string, (env: Env, ctx: ExecutionContext) => Promise<void>> = {
 	"0 3 * * *": autoCleanD30,
 	"0 4 * * 0": auditLogPurge,
 	"0 5 * * *": backupD1,
+	"0 6 * * 1": d1Monitor,
 	"*/15 * * * *": alertMonitor,
 };
 
