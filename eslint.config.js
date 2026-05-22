@@ -23,6 +23,16 @@ export default tseslint.config(
 				"warn",
 				{ allowConstantExport: true },
 			],
+			// Args/vars prefixados com `_` são intencionalmente não-usados
+			// (convenção comum, ex: `_env, _ctx` em handlers no-op).
+			"@typescript-eslint/no-unused-vars": [
+				"error",
+				{
+					argsIgnorePattern: "^_",
+					varsIgnorePattern: "^_",
+					caughtErrorsIgnorePattern: "^_",
+				},
+			],
 		},
 	},
 	// Boundary guard: services puros (sem HTTP, sem CF runtime, sem cross-imports de routes/middleware).

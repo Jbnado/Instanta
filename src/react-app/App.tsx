@@ -1,6 +1,7 @@
 // src/App.tsx
 
 import { useState } from "react";
+import { InAppBrowserWarning } from "./components/shell/in-app-browser-warning";
 import reactLogo from "./assets/react.svg";
 import viteLogo from "/vite.svg";
 import cloudflareLogo from "./assets/Cloudflare_Logo.svg";
@@ -13,6 +14,7 @@ function App() {
 
 	return (
 		<>
+			<InAppBrowserWarning />
 			<div>
 				<a href="https://vite.dev" target="_blank">
 					<img src={viteLogo} className="logo" alt="Vite logo" />
