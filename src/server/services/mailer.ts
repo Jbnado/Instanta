@@ -14,8 +14,17 @@ export interface SendPasswordResetArgs {
 	resetUrl: string;
 }
 
+/** Email crítico de ativação de evento (Story 3.4, FR9/FR67) — entregue ao anfitrião. */
+export interface SendEventActivatedArgs {
+	to: string;
+	eventName: string;
+	/** Link de convite gerado na ativação (base + /event/:slug). */
+	inviteUrl: string;
+}
+
 export interface Mailer {
 	sendPasswordReset(args: SendPasswordResetArgs): Promise<void>;
+	sendEventActivated(args: SendEventActivatedArgs): Promise<void>;
 }
 
 export function createMailer(env: { ENVIRONMENT?: string }): Mailer {
@@ -32,6 +41,23 @@ export function createMailer(env: { ENVIRONMENT?: string }): Mailer {
 			}
 			// Dev/preview: log da URL completa (com token) pra copiar e testar o fluxo.
 			logger.event("auth.reset.email.dev", { to, resetUrl });
+		},
+
+		async sendEventActivated({
+			to,
+			eventName,
+			inviteUrl,
+		}: SendEventActivatedArgs): Promise<void> {
+			if (isProd) {
+				// TODO Epic 4 (Story 4.12): enviar email transacional real via Resend
+				// (reusar `sendEmail` de ../lib/email com template de "evento ativado").
+				// O inviteUrl NÃO é sensível (slug unguessable), mas mantemos só metadados
+				// no log de prod por consistência.
+				logger.event("event.activated.email.queued", { to });
+				return;
+			}
+			// Dev/preview: log da URL de convite completa pra copiar e testar o fluxo.
+			logger.event("event.activated.email.dev", { to, eventName, inviteUrl });
 		},
 	};
 }

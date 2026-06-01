@@ -1,5 +1,7 @@
+import { getDB } from "./db/client";
 import { sendAdminAlert } from "./lib/email";
 import { logger } from "./lib/logger";
+import { createEventService } from "./services/event-service";
 
 // Story 1.8 scaffold: cada handler é no-op com logging started/completed.
 // Story 1.12 implementou d1Monitor (real). Demais stories de feature
@@ -7,8 +9,20 @@ import { logger } from "./lib/logger";
 
 const D1_ALERT_THRESHOLD_BYTES = 7 * 1024 * 1024 * 1024; // 7 GB — 70% do hard cap 10 GB.
 
-async function autoCleanD30(_env: Env, _ctx: ExecutionContext): Promise<void> {
+async function autoCleanD30(env: Env, _ctx: ExecutionContext): Promise<void> {
 	logger.info({ event: "cron.auto-clean-d30.started" });
+
+	// Story 3.5 (FR15): auto-encerra eventos cuja data já passou e ainda estão Ativo.
+	// Roda no cron diário (`0 3 * * *`) — idempotente (só toca status Ativo). Precede
+	// o auto-clean de fotos pq o D+30 conta a partir de ended_at, que esta passada seta.
+	if (env.DB) {
+		const service = createEventService({ db: getDB(env) });
+		const closed = await service.autoCloseExpiredEvents();
+		logger.info({ event: "cron.auto-clean-d30.events-closed", count: closed });
+	} else {
+		logger.warn({ event: "cron.auto-clean-d30.skipped.no-db" });
+	}
+
 	// TODO Story 4.x (photo pipeline): SELECT photos WHERE event.ended_at < now-30d
 	// → CF Images delete + DELETE row; fail-secure se >50% falhar (NFR21/27).
 	logger.info({ event: "cron.auto-clean-d30.completed" });

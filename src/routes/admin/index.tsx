@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 
 /**
  * Painel admin — placeholder da Story 2.7/2.8.
@@ -19,6 +19,13 @@ function AdminPanelPage() {
 				Em construção. Por aqui você vai gerenciar eventos, usuários e
 				configurações da plataforma.
 			</p>
+			{/* Story 3.4: superfície de ativação de eventos pendentes. */}
+			<Link
+				to="/admin/events"
+				className="text-sm font-medium text-primary hover:underline"
+			>
+				Eventos aguardando ativação
+			</Link>
 		</main>
 	);
 }

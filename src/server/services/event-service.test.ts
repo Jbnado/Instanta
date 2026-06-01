@@ -8,6 +8,7 @@ import { createAuthService } from "./auth-service";
 import {
 	ActiveEventLimitError,
 	EventNotFoundError,
+	InvalidEventStateError,
 	createEventService,
 	type EventService,
 } from "./event-service";
@@ -348,6 +349,217 @@ describe("event-service", () => {
 			await expect(
 				service.updateEvent(created.slug, otherId, { name: "Hack" }),
 			).rejects.toBeInstanceOf(EventNotFoundError);
+		});
+	});
+
+	// ========================================================================
+	// Story 3.4 — activateEvent (state machine + ativação admin)
+	// ========================================================================
+	describe("activateEvent", () => {
+		it("transita Inativo → Ativo e devolve o EventDetail com hostUserId", async () => {
+			const hostId = await makeHost(db, "act-ok@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+
+			const result = await service.activateEvent(created.slug);
+			expect(result.detail.status).toBe("Ativo");
+			expect(result.detail.slug).toBe(created.slug);
+			expect(result.hostUserId).toBe(hostId);
+
+			const [row] = await db.select().from(events).where(eq(events.id, created.id));
+			expect(row!.status).toBe("Ativo");
+		});
+
+		it("evento que não está Inativo → InvalidEventStateError", async () => {
+			const hostId = await makeHost(db, "act-already@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug); // Inativo → Ativo
+			// Segunda ativação: já está Ativo → INVALID_STATE.
+			await expect(service.activateEvent(created.slug)).rejects.toBeInstanceOf(
+				InvalidEventStateError,
+			);
+		});
+
+		it("slug inexistente → EventNotFoundError", async () => {
+			await expect(service.activateEvent("nao-existe-xyz")).rejects.toBeInstanceOf(
+				EventNotFoundError,
+			);
+		});
+	});
+
+	// ========================================================================
+	// Story 3.5 — closeEvent (encerrar manual)
+	// ========================================================================
+	describe("closeEvent", () => {
+		it("transita Ativo → Encerrado e seta endedAt", async () => {
+			const hostId = await makeHost(db, "close-ok@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug); // precisa estar Ativo pra encerrar.
+
+			const detail = await service.closeEvent(created.slug, hostId);
+			expect(detail.status).toBe("Encerrado");
+
+			const [row] = await db.select().from(events).where(eq(events.id, created.id));
+			expect(row!.status).toBe("Encerrado");
+			expect(row!.endedAt).toBeInstanceOf(Date);
+		});
+
+		it("evento que não está Ativo (Inativo) → InvalidEventStateError", async () => {
+			const hostId = await makeHost(db, "close-inativo@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await expect(service.closeEvent(created.slug, hostId)).rejects.toBeInstanceOf(
+				InvalidEventStateError,
+			);
+		});
+
+		it("evento de outro anfitrião → EventNotFoundError (não vaza posse)", async () => {
+			const hostId = await makeHost(db, "close-owner@example.com");
+			const otherId = await makeHost(db, "close-other@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug);
+			await expect(service.closeEvent(created.slug, otherId)).rejects.toBeInstanceOf(
+				EventNotFoundError,
+			);
+		});
+	});
+
+	// ========================================================================
+	// Story 3.5 — autoCloseExpiredEvents (encerramento automático via cron)
+	// ========================================================================
+	describe("autoCloseExpiredEvents", () => {
+		it("encerra só eventos Ativo com eventDate passada; idempotente", async () => {
+			// Clock fixo: "agora" = 2026-06-01.
+			const fixedNow = new Date("2026-06-01T12:00:00Z");
+			const svc = createEventService({ db, now: () => fixedNow });
+			const hostId = await makeHost(db, "auto-close@example.com");
+
+			// Passado + Ativo → deve encerrar.
+			const past = await svc.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "Passado", eventDate: new Date("2026-05-01T20:00:00Z") }),
+			});
+			await svc.activateEvent(past.slug);
+
+			// Futuro + Ativo → NÃO encerra.
+			const future = await svc.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "Futuro", eventDate: new Date("2026-12-01T20:00:00Z") }),
+			});
+			await svc.activateEvent(future.slug);
+
+			// Passado mas Inativo → NÃO encerra (só toca Ativo).
+			const pastInativo = await svc.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "PassadoInativo", eventDate: new Date("2026-05-02T20:00:00Z") }),
+			});
+
+			const closed = await svc.autoCloseExpiredEvents();
+			expect(closed).toBe(1);
+
+			const [pastRow] = await db.select().from(events).where(eq(events.id, past.id));
+			expect(pastRow!.status).toBe("Encerrado");
+			expect(pastRow!.endedAt).toBeInstanceOf(Date);
+
+			const [futureRow] = await db.select().from(events).where(eq(events.id, future.id));
+			expect(futureRow!.status).toBe("Ativo");
+
+			const [inativoRow] = await db.select().from(events).where(eq(events.id, pastInativo.id));
+			expect(inativoRow!.status).toBe("Inativo");
+
+			// 2ª execução: nada mais pra encerrar (idempotente).
+			expect(await svc.autoCloseExpiredEvents()).toBe(0);
+		});
+	});
+
+	// ========================================================================
+	// Story 3.4 — getPublicEvent (gate de existência do convidado)
+	// ========================================================================
+	describe("getPublicEvent", () => {
+		it("retorna dados só quando Ativo (null pra Inativo e Encerrado)", async () => {
+			const hostId = await makeHost(db, "public-gate@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+
+			// Inativo → null.
+			expect(await service.getPublicEvent(created.slug)).toBeNull();
+
+			// Ativo → dados públicos mínimos.
+			await service.activateEvent(created.slug);
+			const pub = await service.getPublicEvent(created.slug);
+			expect(pub).not.toBeNull();
+			expect(pub!.slug).toBe(created.slug);
+			expect(pub!.name).toBe("Festa da Ana");
+			expect(pub!.status).toBe("Ativo");
+			expect(pub!.colorAccent).toBe("#A855F7");
+
+			// Encerrado → null.
+			await service.closeEvent(created.slug, hostId);
+			expect(await service.getPublicEvent(created.slug)).toBeNull();
+		});
+
+		it("retorna null pra slug inexistente", async () => {
+			expect(await service.getPublicEvent("nao-existe-xyz")).toBeNull();
+		});
+	});
+
+	// ========================================================================
+	// Story 3.4 — listPendingEventsForAdmin (painel admin)
+	// ========================================================================
+	describe("listPendingEventsForAdmin", () => {
+		it("retorna só eventos Inativo com info do host, ordenados por data", async () => {
+			// isolatedStorage isola por ARQUIVO (não por teste): outros describes deixam
+			// eventos Inativo na tabela. Usamos nomes únicos (prefixo) e filtramos pelos
+			// nossos pra a asserção ser determinística mesmo com dados residuais.
+			const hostId = await makeHost(db, "pending-host@example.com");
+
+			// Dois Inativos fora de ordem + um Ativo (não deve aparecer).
+			await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "PEND-Julho", eventDate: new Date("2026-07-15T20:00:00Z") }),
+			});
+			await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({
+					name: "PEND-Maio",
+					eventDate: new Date("2026-05-01T20:00:00Z"),
+					presetMissionIds: ["brinde"],
+				}),
+			});
+			const ativo = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "PEND-JaAtivo" }),
+			});
+			await service.activateEvent(ativo.slug);
+
+			const pending = await service.listPendingEventsForAdmin();
+			const ours = pending.filter((p) => p.name.startsWith("PEND-"));
+			const names = ours.map((p) => p.name);
+			// Só Inativos, ordenados por data (Maio antes de Julho).
+			expect(names).toContain("PEND-Maio");
+			expect(names).toContain("PEND-Julho");
+			expect(names).not.toContain("PEND-JaAtivo");
+			expect(names.indexOf("PEND-Maio")).toBeLessThan(names.indexOf("PEND-Julho"));
+
+			const maio = ours.find((p) => p.name === "PEND-Maio")!;
+			expect(maio.hostEmail).toBe("pending-host@example.com");
+			expect(maio.missionsCount).toBe(1);
+			expect(typeof maio.eventDate).toBe("string");
 		});
 	});
 });

@@ -11,16 +11,17 @@
  * - Clock injetável (`now`) pra testes determinísticos.
  * - Inserts numa transação (atomicidade evento + missões).
  */
-import { and, asc, eq, ne } from "drizzle-orm";
+import { and, asc, eq, lt, ne, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 
 import type { DB } from "../db/client";
-import { eventMissions, events } from "../db/schema";
+import { eventMissions, events, users } from "../db/schema";
 import { hashPassword } from "../lib/password";
 import { presetLabelById } from "../../lib/shared/mission-presets";
 import type {
 	CreateEventInput,
 	EventDetail,
+	EventPublic,
 	UpdateEventInput,
 } from "../../lib/shared/schemas/event";
 
@@ -69,6 +70,28 @@ export interface EventListItem {
 	description: string | null;
 }
 
+/**
+ * Resultado de activateEvent (Story 3.4). O serviço só flipa o status e devolve o
+ * detalhe + o id do host; o envio do email crítico (FR9/FR67) fica na ROTA, que
+ * resolve o email do host e chama o mailer — mantém o serviço puro-ish (sem mailer dep).
+ */
+export interface ActivateEventResult {
+	detail: EventDetail;
+	hostUserId: string;
+}
+
+/** Item da fila de ativação do painel admin (Story 3.4). Inclui info do host + #missões. */
+export interface PendingEventForAdmin {
+	id: string;
+	slug: string;
+	name: string;
+	eventDate: string; // ISO
+	hostUserId: string;
+	hostEmail: string;
+	hostName: string | null;
+	missionsCount: number;
+}
+
 export interface EventServiceDeps {
 	db: DB;
 	/** Clock injetável para testes determinísticos. */
@@ -96,6 +119,36 @@ export interface EventService {
 		hostUserId: string,
 		input: UpdateEventInput,
 	): Promise<EventDetail>;
+	/**
+	 * Ativa um evento (Story 3.4, FR53) — operação ADMIN (sem checagem de posse: a
+	 * ativação é prerrogativa do admin, não do dono). Transição PERMITIDA: Inativo→Ativo.
+	 * Slug inexistente → EventNotFoundError; status ≠ Inativo → InvalidEventStateError.
+	 * Não envia email aqui (a rota faz, com o email do host) — devolve detail + hostUserId.
+	 */
+	activateEvent(slug: string): Promise<ActivateEventResult>;
+	/**
+	 * Encerra um evento do anfitrião (Story 3.5, FR14). Transição PERMITIDA: Ativo→Encerrado.
+	 * Não existe OU não é dono → EventNotFoundError (404, R-019); status ≠ Ativo →
+	 * InvalidEventStateError. Seta endedAt=now.
+	 */
+	closeEvent(slug: string, hostUserId: string): Promise<EventDetail>;
+	/**
+	 * Auto-encerra eventos cuja data já passou e ainda estão Ativo (Story 3.5, FR15).
+	 * Rodado por cron. Idempotente: só toca status Ativo, então 2ª passada fecha 0.
+	 * Retorna a quantidade de eventos encerrados.
+	 */
+	autoCloseExpiredEvents(): Promise<number>;
+	/**
+	 * Gate de existência pro convidado (Story 3.4, R-019). Retorna os dados públicos
+	 * mínimos SOMENTE se o evento está Ativo; caso contrário (Inativo/Encerrado/inexistente)
+	 * retorna null — a rota mapeia null → 404 sem revelar que o evento existe.
+	 */
+	getPublicEvent(slug: string): Promise<EventPublic | null>;
+	/**
+	 * Lista eventos pendentes de ativação (status Inativo) pro painel admin (Story 3.4).
+	 * Faz join com users pra trazer email/nome do host + conta as missões; ordena por data.
+	 */
+	listPendingEventsForAdmin(): Promise<PendingEventForAdmin[]>;
 }
 
 // ============================================================================
@@ -121,6 +174,18 @@ export class EventNotFoundError extends Error {
 	readonly code = "NOT_FOUND";
 	constructor() {
 		super("Evento não encontrado");
+	}
+}
+
+/**
+ * Transição de status inválida na state machine de evento (Story 3.4/3.5): ativar um
+ * evento que não está Inativo, ou encerrar um que não está Ativo. A rota traduz pra
+ * 400 { error: "INVALID_STATE" }.
+ */
+export class InvalidEventStateError extends Error {
+	readonly code = "INVALID_STATE";
+	constructor() {
+		super("Transição de status do evento inválida");
 	}
 }
 
@@ -420,5 +485,122 @@ export function createEventService(deps: EventServiceDeps): EventService {
 		return toEventDetail(fresh!, missions);
 	}
 
-	return { createEvent, listEventsForHost, getEventForHost, updateEvent };
+	// ------------------------------------------------------------------------
+	// Story 3.4 — ativar evento (admin): Inativo → Ativo.
+	// ------------------------------------------------------------------------
+	async function activateEvent(slug: string): Promise<ActivateEventResult> {
+		// Ativação é op de admin → sem filtro por hostUserId (carrega só pelo slug).
+		const [row] = await db.select().from(events).where(eq(events.slug, slug));
+		if (!row) throw new EventNotFoundError();
+		// State machine: só Inativo→Ativo é permitido (FR53).
+		if (row.status !== "Inativo") throw new InvalidEventStateError();
+
+		await db.update(events).set({ status: "Ativo" }).where(eq(events.id, row.id));
+
+		const missions = await loadMissions(row.id);
+		const detail = toEventDetail({ ...row, status: "Ativo" }, missions);
+		return { detail, hostUserId: row.hostUserId };
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.5 — encerrar evento (host): Ativo → Encerrado.
+	// ------------------------------------------------------------------------
+	async function closeEvent(slug: string, hostUserId: string): Promise<EventDetail> {
+		const row = await loadOwnedEvent(slug, hostUserId);
+		// 404 (não 403): não revela existência/posse a terceiros (R-019).
+		if (!row) throw new EventNotFoundError();
+		// State machine: só Ativo→Encerrado é permitido (FR14).
+		if (row.status !== "Ativo") throw new InvalidEventStateError();
+
+		const endedAt = now();
+		await db
+			.update(events)
+			.set({ status: "Encerrado", endedAt })
+			.where(eq(events.id, row.id));
+
+		const missions = await loadMissions(row.id);
+		return toEventDetail({ ...row, status: "Encerrado", endedAt }, missions);
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.5 — auto-encerrar eventos vencidos (cron, FR15). Idempotente.
+	// ------------------------------------------------------------------------
+	async function autoCloseExpiredEvents(): Promise<number> {
+		const cutoff = now();
+		// Só toca status Ativo com eventDate no passado → 2ª passada fecha 0 (idempotente).
+		const result = await db
+			.update(events)
+			.set({ status: "Encerrado", endedAt: cutoff })
+			.where(and(eq(events.status, "Ativo"), lt(events.eventDate, cutoff)));
+		// D1 expõe `meta.changes` (linhas afetadas) via o run result do drizzle-d1.
+		const changes = (result as unknown as { meta?: { changes?: number } }).meta?.changes;
+		return changes ?? 0;
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.4 — gate de existência público (convidado). Só Ativo retorna dados.
+	// ------------------------------------------------------------------------
+	async function getPublicEvent(slug: string): Promise<EventPublic | null> {
+		const [row] = await db
+			.select({
+				id: events.id,
+				slug: events.slug,
+				name: events.name,
+				status: events.status,
+				colorAccent: events.colorAccent,
+			})
+			.from(events)
+			.where(eq(events.slug, slug));
+		// Inativo/Encerrado/inexistente → null (rota → 404, R-019). Só Ativo "existe".
+		if (!row || row.status !== "Ativo") return null;
+		return row;
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.4 — fila de ativação do painel admin (eventos Inativo + info host).
+	// ------------------------------------------------------------------------
+	async function listPendingEventsForAdmin(): Promise<PendingEventForAdmin[]> {
+		const rows = await db
+			.select({
+				id: events.id,
+				slug: events.slug,
+				name: events.name,
+				eventDate: events.eventDate,
+				hostUserId: events.hostUserId,
+				hostEmail: users.email,
+				hostName: users.displayName,
+				// Conta as missões do evento via subquery correlacionada (sem GROUP BY).
+				missionsCount: sql<number>`(
+					SELECT COUNT(*) FROM ${eventMissions}
+					WHERE ${eventMissions.eventId} = ${events.id}
+				)`,
+			})
+			.from(events)
+			.innerJoin(users, eq(users.id, events.hostUserId))
+			.where(eq(events.status, "Inativo"))
+			.orderBy(asc(events.eventDate));
+
+		return rows.map((r) => ({
+			id: r.id,
+			slug: r.slug,
+			name: r.name,
+			eventDate: r.eventDate.toISOString(),
+			hostUserId: r.hostUserId,
+			hostEmail: r.hostEmail,
+			hostName: r.hostName,
+			missionsCount: Number(r.missionsCount),
+		}));
+	}
+
+	return {
+		createEvent,
+		listEventsForHost,
+		getEventForHost,
+		updateEvent,
+		activateEvent,
+		closeEvent,
+		autoCloseExpiredEvents,
+		getPublicEvent,
+		listPendingEventsForAdmin,
+	};
 }

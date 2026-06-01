@@ -101,6 +101,9 @@ export const EVENT_ERROR_CODES = {
 	VALIDATION: "VALIDATION",
 	NOT_FOUND: "NOT_FOUND",
 	FORBIDDEN: "FORBIDDEN",
+	// Transição de status inválida (ex: encerrar evento que não está Ativo;
+	// ativar evento que não está Inativo). Story 3.4/3.5 state machine.
+	INVALID_STATE: "INVALID_STATE",
 } as const;
 
 export type EventErrorCode =

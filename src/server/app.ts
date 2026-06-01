@@ -7,6 +7,7 @@ import {
 	rateLimitMiddleware,
 	secureHeadersMiddleware,
 } from "./middleware";
+import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
 import { eventRoutes } from "./routes/events";
 
@@ -32,6 +33,10 @@ app.route("/api/auth", authRoutes);
 // Events (Story 3.1): criar evento. authMiddleware + rate limit por usuário aplicados
 // dentro do módulo de rota (não global).
 app.route("/api/events", eventRoutes);
+
+// Admin (Story 3.4): fila de ativação + ativar evento. authMiddleware + guard admin
+// aplicados dentro do módulo de rota (não global).
+app.route("/api/admin", adminRoutes);
 
 // Rotas de debug pro Rate Limiter — prefixo `_` indica diagnóstico interno.
 // Mantidas em prod pra debugar sem rebuild (remover via story se virar surface ruim).

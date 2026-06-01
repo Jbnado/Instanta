@@ -21,6 +21,7 @@ import { type AuthUser } from "../lib/auth-cookies";
 import {
 	ActiveEventLimitError,
 	EventNotFoundError,
+	InvalidEventStateError,
 	createEventService,
 } from "../services/event-service";
 
@@ -127,3 +128,39 @@ eventRoutes.patch(
 		}
 	},
 );
+
+// ============================================================================
+// POST /:slug/close — encerrar evento (Story 3.5, FR14).
+// ============================================================================
+// Host-only (authMiddleware). State machine: só Ativo→Encerrado. Não existe/não é
+// dono → 404 NOT_FOUND (R-019); status ≠ Ativo → 400 INVALID_STATE.
+eventRoutes.post("/:slug/close", authMiddleware(), async (c) => {
+	const db = getDB(c.env);
+	const service = createEventService({ db });
+	try {
+		const event = await service.closeEvent(c.req.param("slug"), c.get("user").id);
+		return c.json({ event });
+	} catch (err) {
+		if (err instanceof EventNotFoundError) {
+			return c.json({ error: "NOT_FOUND" }, 404);
+		}
+		if (err instanceof InvalidEventStateError) {
+			return c.json({ error: "INVALID_STATE" }, 400);
+		}
+		throw err;
+	}
+});
+
+// ============================================================================
+// GET /:slug/public — gate de existência do convidado (Story 3.4, R-019).
+// ============================================================================
+// SEM authMiddleware: convidado não está logado. Só evento Ativo retorna 200;
+// Inativo/Encerrado/inexistente → 404 NOT_FOUND (não revela que existe). A Epic 5
+// expande o fluxo real de convidado a partir daqui.
+eventRoutes.get("/:slug/public", async (c) => {
+	const db = getDB(c.env);
+	const service = createEventService({ db });
+	const event = await service.getPublicEvent(c.req.param("slug"));
+	if (!event) return c.json({ error: "NOT_FOUND" }, 404);
+	return c.json({ event });
+});
