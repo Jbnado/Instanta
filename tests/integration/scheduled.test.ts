@@ -28,9 +28,9 @@ describe("scheduled", () => {
 		).resolves.toBeUndefined();
 	});
 
-	it("audit-log-purge (0 4 * * 0) completa sem erro", async () => {
+	it("audit-log-purge (0 4 * * 7) completa sem erro", async () => {
 		await expect(
-			scheduled(makeController("0 4 * * 0"), env, makeCtx()),
+			scheduled(makeController("0 4 * * 7"), env, makeCtx()),
 		).resolves.toBeUndefined();
 	});
 

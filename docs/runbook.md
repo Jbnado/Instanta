@@ -168,7 +168,7 @@ Se ultrapassar, suspeitar de cache pnpm não hidratado (primeiro run sempre mais
 | Cron (UTC) | UTC | BRT | Handler | Finalidade |
 |---|---|---|---|---|
 | `0 3 * * *` | diário 03:00 | 00:00 | `auto-clean-d30` | DELETE photos com event.ended_at < now-30d (NFR21+NFR27); idempotente |
-| `0 4 * * 0` | domingo 04:00 | sáb 01:00 | `audit-log-purge` | DELETE audit_log onde created_at < now-12meses (NFR46) |
+| `0 4 * * 7` | domingo 04:00 | sáb 01:00 | `audit-log-purge` | DELETE audit_log onde created_at < now-12meses (NFR46). CF cron usa dia-da-semana 1-7 (domingo=7, não 0). |
 | `0 5 * * *` | diário 05:00 | 02:00 | `backup-d1` | `wrangler d1 export` → R2 (NFR29, retenção 7 dias) |
 | `*/15 * * * *` | a cada 15min | — | `alert-monitor` | spike detection auth/cap/D1 size/auto-clean failures (NFR61) |
 

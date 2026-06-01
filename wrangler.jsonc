@@ -5,6 +5,9 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "instanta",
+	// Account ID explícito: o whoami/deploy não conseguia auto-resolver a conta com o
+	// token atual. Não é secreto (aparece em URLs/CI). Pula a enumeração de contas.
+	"account_id": "34379820b5e46d36e1761b38f6017207",
 	"main": "./src/server/index.ts",
 	"compatibility_date": "2025-10-08",
 	"compatibility_flags": [
@@ -18,12 +21,12 @@
 		"directory": "./dist/client",
 		"not_found_handling": "single-page-application"
 	},
-	"routes": [
-		{
-			"pattern": "instanta.jbnado.dev",
-			"custom_domain": true
-		}
-	],
+	// Custom domain DESABILITADO por ora: jbnado.dev não é zona Cloudflare (registrar
+	// Squarespace, DNS na Vercel pro portfolio). Workers custom domain exige a zona na CF.
+	// 1º deploy vai pro `.workers.dev`. Reabilitar ao migrar o DNS do jbnado.dev pra
+	// Cloudflare (docs/runbook.md §Domain). ALLOWED_ORIGINS precisa ganhar a URL real
+	// `.workers.dev` pós-deploy pra mutations passarem no CSRF/assertOrigin.
+	// "routes": [{ "pattern": "instanta.jbnado.dev", "custom_domain": true }],
 	"version_metadata": {
 		"binding": "CF_VERSION_METADATA"
 	},
@@ -46,7 +49,7 @@
 		// UTC. Veja `docs/runbook.md` § Cron Triggers pra tabela com horário em BRT.
 		"crons": [
 			"0 3 * * *",   // auto-clean-d30 (diário 03:00 UTC = 00:00 BRT)
-			"0 4 * * 0",   // audit-log-purge (domingo 04:00 UTC)
+			"0 4 * * 7",   // audit-log-purge (domingo 04:00 UTC — CF usa 1-7, domingo=7 não 0)
 			"0 5 * * *",   // backup-d1 (diário 05:00 UTC = 02:00 BRT)
 			"0 6 * * 1",   // d1-monitor (segunda 06:00 UTC = 03:00 BRT — B-001)
 			"*/15 * * * *" // alert-monitor (15min)
@@ -79,7 +82,9 @@
 	],
 	"vars": {
 		"ENVIRONMENT": "production",
-		"ALLOWED_ORIGINS": "https://instanta.jbnado.dev",
+		// workers.dev em 1º (origem que serve hoje + base dos links de invite/reset via
+		// getAllowedOrigins[0]). jbnado.dev fica pra quando o domínio migrar pra Cloudflare.
+		"ALLOWED_ORIGINS": "https://instanta.bernardojoao9.workers.dev,https://instanta.jbnado.dev",
 		"ADMIN_EMAIL": "bernardojoao9@gmail.com"
 	},
 	"env": {

@@ -98,7 +98,7 @@ async function d1Monitor(env: Env, _ctx: ExecutionContext): Promise<void> {
 
 const CRON_TO_HANDLER: Record<string, (env: Env, ctx: ExecutionContext) => Promise<void>> = {
 	"0 3 * * *": autoCleanD30,
-	"0 4 * * 0": auditLogPurge,
+	"0 4 * * 7": auditLogPurge, // domingo; CF cron usa 1-7 (domingo=7), não 0
 	"0 5 * * *": backupD1,
 	"0 6 * * 1": d1Monitor,
 	"*/15 * * * *": alertMonitor,
