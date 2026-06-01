@@ -7,6 +7,7 @@ import {
 	rateLimitMiddleware,
 	secureHeadersMiddleware,
 } from "./middleware";
+import { authRoutes } from "./routes/auth";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -22,6 +23,10 @@ app.use("/api/*", csrfMiddleware());
 
 app.get("/api/", (c) => c.json({ name: "Cloudflare" }));
 app.get("/api/health", (c) => c.json({ status: "ok" }));
+
+// Auth (Story 2.1): signup + rota protegida de diagnóstico. Montado antes das
+// rotas de debug. Middleware `auth.ts` NÃO é global — só onde a rota pede.
+app.route("/api/auth", authRoutes);
 
 // Rotas de debug pro Rate Limiter — prefixo `_` indica diagnóstico interno.
 // Mantidas em prod pra debugar sem rebuild (remover via story se virar surface ruim).

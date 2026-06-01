@@ -75,4 +75,13 @@ export default tseslint.config(
 			],
 		},
 	},
+	// Exceção ao boundary guard: testes de service rodam no project `workers`
+	// (workerd real) e precisam de `cloudflare:test` (env D1) + helpers de runtime.
+	// O guard de produção continua valendo pro código de service não-teste.
+	{
+		files: ["src/server/services/**/*.test.{ts,tsx}"],
+		rules: {
+			"no-restricted-imports": "off",
+		},
+	},
 );

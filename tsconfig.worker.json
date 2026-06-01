@@ -10,5 +10,6 @@
 			"@server/*": ["src/server/*"]
 		}
 	},
-	"include": ["src/server", "src/shared"]
+	"include": ["src/server", "src/shared"],
+	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

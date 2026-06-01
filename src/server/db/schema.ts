@@ -32,6 +32,10 @@ export const users = sqliteTable(
 		displayName: text("display_name"),
 		totalInstantes: integer("total_instantes").notNull().default(0),
 		currentLevel: integer("current_level").notNull().default(1),
+		// LGPD: nullable pra suportar despersonalização (direito ao esquecimento) —
+		// usuário pode ter tido a coluna zerada sem perder o aceite histórico.
+		// Populado no signup (Story 2.1) com timestamp do momento do aceite do T&C.
+		termsAcceptedAt: integer("terms_accepted_at", { mode: "timestamp" }),
 		deletedAt: integer("deleted_at", { mode: "timestamp" }),
 		createdAt: integer("created_at", { mode: "timestamp" })
 			.notNull()

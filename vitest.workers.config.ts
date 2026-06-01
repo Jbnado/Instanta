@@ -18,7 +18,16 @@ export default defineConfig({
 			return {
 				wrangler: { configPath: "./wrangler.jsonc" },
 				miniflare: {
-					bindings: { TEST_MIGRATIONS: migrations },
+					bindings: {
+						TEST_MIGRATIONS: migrations,
+						// Secret de teste (não é o de prod; só assina/valida JWT no workerd local).
+						AUTH_JWT_SECRET: "test-secret-aaaa-bbbb-cccc-dddd-eeee-ffff-32-bytes",
+						// ENVIRONMENT fica UNDEFINED de propósito → secure-headers trata como
+						// prod (style-src sem unsafe-inline), o que os testes da Story 1.6 exigem.
+						// ALLOWED_ORIGINS contém prod (1ª — Story 1.6 lê split[0]) E localhost
+						// (rotas de auth postam de localhost:5173 no teste).
+						ALLOWED_ORIGINS: "https://instanta.jbnado.dev,http://localhost:5173",
+					},
 					compatibilityFlags: ["nodejs_compat"],
 				},
 				// Zera D1/KV/DO entre testes — sobrescreve a granularidade que a

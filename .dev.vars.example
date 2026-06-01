@@ -15,4 +15,8 @@ SENTRY_DSN=
 # Adicione secrets locais aqui à medida que stories futuras (auth, Resend) os introduzirem.
 # Exemplos (não usar valores reais):
 # RESEND_API_KEY=
-# SESSION_SECRET=
+
+# JWT HS256 pro access token de auth (Story 2.1).
+# Em dev local: gere com `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`.
+# Em prod: `wrangler secret put AUTH_JWT_SECRET`. NUNCA commitar valor real aqui.
+AUTH_JWT_SECRET=dev-only-rotate-me-with-real-secret-generated-locally

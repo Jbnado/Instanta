@@ -33,5 +33,13 @@
 		/* Types pros testes co-located (`*.test.tsx` em src/) */
 		"types": ["vite/client", "@testing-library/jest-dom"]
 	},
-	"include": ["src/react-app", "src/shared", "src/components", "src/lib", "src/hooks"]
+	"include": [
+		"src/react-app",
+		"src/shared",
+		"src/components",
+		"src/lib",
+		"src/hooks",
+		"src/routes",
+		"src/routeTree.gen.ts"
+	]
 }

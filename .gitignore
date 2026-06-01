@@ -203,3 +203,7 @@ coverage/
 playwright-report/
 test-results/
 .playwright/
+
+### Generated ###
+# TanStack Router file-based — regenerado pelo vite plugin a cada build/dev.
+src/routeTree.gen.ts
