@@ -1,25 +1,32 @@
 /**
- * Photo service — Epic 6 (Stories 6.5 / 6.6 / server-side da 6.7).
+ * Photo service — Epic 6 (Stories 6.5 / 6.6 / 6.7), pivot CF Images → R2.
  *
  * Serviço puro (não importa hono/c.env/middleware); deps via factory pra teste isolado.
- * Cobre o lado servidor do pipeline de upload com upload DIRETO pro Cloudflare Images:
+ * Cobre o lado servidor do pipeline de upload com upload ATRAVÉS do Worker pro R2:
  *
- *  - requestUpload (6.5 + 6.7): carrega o evento Ativo, autoriza o uploader, valida
- *    magic bytes + tamanho + dimensões a partir de uma amostra do cabeçalho enviada
- *    pelo cliente (o Worker nunca vê o arquivo inteiro), e emite a URL assinada.
- *  - confirmUpload (6.6 + 6.7): reserva o cap atomicamente (compare-and-swap, R-001) e
- *    insere a row em event_photos na MESMA transação (db.batch). Cleanup de órfã se falhar.
+ *  - uploadPhoto (6.5 + 6.6 + 6.7): recebe os BYTES reais da foto (o cliente comprime
+ *    antes). Carrega o evento Ativo, autoriza o uploader, valida magic bytes + tamanho
+ *    + dimensões nos bytes REAIS, reserva o cap atomicamente (compare-and-swap, R-001)
+ *    e insere a row em event_photos na MESMA transação (db.batch), e grava no R2. Se o
+ *    cap estoura na corrida, desfaz a row e remove o objeto órfão do R2.
+ *  - getPhotoFile (serving): resolve a storage key pela foto e lê o objeto do R2 pra
+ *    rota `GET /:slug/photos/:photoId/file` servir o stream.
  *
  * Convenções (espelha event-service/auth-service):
  *  - Erros tipados; a rota traduz pra HTTP code + microcopy.
  *  - Clock injetável (`now`) pra testes determinísticos.
+ *
+ * Nota sobre dimensões: como o upload agora passa pelos bytes completos, o cliente
+ * ainda informa width/height (não decodificamos a imagem no Worker — workerd não tem
+ * canvas/decoder nativo barato). A barreira anti decompression-bomb continua sendo o
+ * teto declarado + o teto de bytes; é defesa em profundidade, não decode real.
  */
 import { fileTypeFromBuffer } from "file-type";
 import { and, eq, sql } from "drizzle-orm";
 
 import type { DB } from "../db/client";
 import { eventPhotos, events } from "../db/schema";
-import type { CfImages } from "../adapters/cf-images";
+import type { Storage, StorageObject } from "../adapters/r2-storage";
 import {
 	MAX_IMAGE_DIMENSION,
 	MAX_UPLOAD_BYTES,
@@ -46,48 +53,39 @@ const ALLOWED_MIMES = new Set([
 // Tipos
 // ============================================================================
 
-export interface RequestUploadArgs {
+export interface UploadPhotoArgs {
 	eventSlug: string;
 	/** Usuário autenticado que está enviando (host por enquanto — ver authorize). */
 	uploaderUserId: string;
-	/** Amostra do CABEÇALHO do arquivo (~64 bytes) pra detecção de magic bytes. */
-	headerSample: Uint8Array;
-	/** Tamanho declarado do arquivo (validado de novo no confirm). */
-	sizeBytes: number;
+	/** Bytes REAIS da foto (já comprimida pelo cliente). */
+	bytes: Uint8Array;
+	/** Dimensões declaradas pelo cliente (decompression-bomb guard). */
 	width: number;
 	height: number;
 }
 
-export interface RequestUploadResult {
-	uploadUrl: string;
-	imageId: string;
-}
-
-export interface ConfirmUploadArgs {
-	eventSlug: string;
-	uploaderUserId: string;
-	/** Id pré-alocado devolvido pelo requestUpload. */
-	imageId: string;
-	/** Tamanho REAL do arquivo enviado (base do contador de cap). */
-	sizeBytes: number;
-}
-
-export interface ConfirmUploadResult {
+export interface UploadPhotoResult {
 	id: string;
-	cfImageId: string;
+	/** Storage key no R2 (guardada em event_photos.cf_image_id). */
+	storageKey: string;
 	createdAt: Date;
+}
+
+export interface GetPhotoFileArgs {
+	eventSlug: string;
+	photoId: string;
 }
 
 export interface PhotoServiceDeps {
 	db: DB;
-	images: CfImages;
+	storage: Storage;
 	/** Clock injetável para testes determinísticos. */
 	now?: () => Date;
 }
 
 export interface PhotoService {
-	requestUpload(args: RequestUploadArgs): Promise<RequestUploadResult>;
-	confirmUpload(args: ConfirmUploadArgs): Promise<ConfirmUploadResult>;
+	uploadPhoto(args: UploadPhotoArgs): Promise<UploadPhotoResult>;
+	getPhotoFile(args: GetPhotoFileArgs): Promise<StorageObject | null>;
 }
 
 // ============================================================================
@@ -124,7 +122,7 @@ export class StorageCapExceededError extends Error {
 // ============================================================================
 
 export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
-	const { db, images, now = () => new Date() } = deps;
+	const { db, storage, now = () => new Date() } = deps;
 
 	/**
 	 * Carrega o evento pelo slug e exige que esteja Ativo + que o uploader possa enviar.
@@ -150,19 +148,17 @@ export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
 	}
 
 	// ------------------------------------------------------------------------
-	// Story 6.5 + 6.7 — validar + emitir URL assinada de upload direto.
+	// Stories 6.5 + 6.6 + 6.7 — validar bytes reais + cap atomic (CAS) + put R2.
 	// ------------------------------------------------------------------------
-	async function requestUpload(
-		args: RequestUploadArgs,
-	): Promise<RequestUploadResult> {
-		const { eventSlug, uploaderUserId, headerSample, sizeBytes, width, height } =
-			args;
+	async function uploadPhoto(args: UploadPhotoArgs): Promise<UploadPhotoResult> {
+		const { eventSlug, uploaderUserId, bytes, width, height } = args;
+		const sizeBytes = bytes.byteLength;
 
 		// 1. Evento Ativo + uploader autorizado (host por enquanto).
 		const event = await loadActiveEventForUploader(eventSlug, uploaderUserId);
 
-		// 2. Tamanho pré-compressão (Story 6.5). > 20MB → rejeita.
-		if (sizeBytes > MAX_UPLOAD_BYTES) {
+		// 2. Tamanho real (Story 6.5). 0 ou > 20MB → rejeita.
+		if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
 			throw new InvalidImageError("Arquivo maior que o limite de 20MB.");
 		}
 
@@ -171,43 +167,16 @@ export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
 			throw new InvalidImageError("Imagem com dimensões grandes demais.");
 		}
 
-		// 4. Magic bytes (Story 6.5, NFR57): file-type lê a amostra do cabeçalho. Só
-		//    JPEG/PNG/HEIC passam; SVG/GIF/texto/polyglot → InvalidImageError. Como o
-		//    upload vai DIRETO pro CF Images, validamos no request (o Worker nunca vê
-		//    os bytes completos), não num fetch pós-upload.
-		const detected = await fileTypeFromBuffer(headerSample);
+		// 4. Magic bytes (Story 6.5, NFR57): file-type lê os bytes REAIS (não uma amostra
+		//    de header — o upload passa pelo Worker agora). Só JPEG/PNG/HEIC passam;
+		//    SVG/GIF/texto/polyglot → InvalidImageError.
+		const detected = await fileTypeFromBuffer(bytes);
 		if (!detected || !ALLOWED_MIMES.has(detected.mime)) {
 			throw new InvalidImageError("Formato de imagem não suportado.");
 		}
 
-		// 5. Soft pre-check de cap (a reserva firme acontece no confirm com o tamanho
-		//    real; aqui é só um 409 antecipado pra economizar a viagem do upload).
-		if (event.bytesUsed + sizeBytes > event.cap) {
-			throw new StorageCapExceededError();
-		}
-
-		// 6. Emite a URL assinada + id pré-alocado (Story 6.7, ADD-6).
-		return images.createSignedUploadURL();
-	}
-
-	// ------------------------------------------------------------------------
-	// Story 6.6 + 6.7 — confirmar: cap atomic (CAS) + insert event_photos.
-	// ------------------------------------------------------------------------
-	async function confirmUpload(
-		args: ConfirmUploadArgs,
-	): Promise<ConfirmUploadResult> {
-		const { eventSlug, uploaderUserId, imageId, sizeBytes } = args;
-
-		// Revalida tamanho real (defesa em profundidade — o cliente manda o size do confirm).
-		if (sizeBytes <= 0 || sizeBytes > MAX_UPLOAD_BYTES) {
-			throw new InvalidImageError("Tamanho de arquivo inválido.");
-		}
-
-		// Evento Ativo + uploader autorizado. (Carrega só pra obter o id + checar posse/estado;
-		// a reserva de cap NÃO usa esse bytesUsed lido — usa o CAS atômico abaixo.)
-		const event = await loadActiveEventForUploader(eventSlug, uploaderUserId);
-
 		const photoId = crypto.randomUUID();
+		const storageKey = storage.keyFor(event.id, photoId);
 		const createdAt = now();
 
 		// ── Story 6.6 (R-001): compare-and-swap atômico do cap ──────────────────
@@ -227,6 +196,7 @@ export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
 			);
 
 		// Insert da foto na MESMA transação (db.batch) que a reserva de cap (Story 6.7).
+		// cf_image_id guarda a storage key do R2 (coluna mantida pra evitar migration).
 		// TODO Epic 10 (gamificação, ADD-25): incrementar user_event_history.photos_uploaded
 		// += 1 e users.total_instantes += 1 nesta MESMA batch. Os counters de gamificação
 		// chegam na Epic 10; por ora só cap + a row da foto.
@@ -234,7 +204,7 @@ export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
 			id: photoId,
 			eventId: event.id,
 			uploaderUserId,
-			cfImageId: imageId,
+			cfImageId: storageKey,
 			sizeBytes,
 			telaoVisible: true, // default: foto entra visível no telão (toggle vem depois).
 			createdAt,
@@ -253,15 +223,38 @@ export function createPhotoService(deps: PhotoServiceDeps): PhotoService {
 			// foi feito na mesma batch — precisamos desfazer pra não deixar a row órfã.
 			// (db.batch do D1 não é all-or-nothing por padrão, então limpamos manualmente.)
 			await db.delete(eventPhotos).where(eq(eventPhotos.id, photoId));
-			// Cleanup best-effort da imagem órfã no CF Images (não deixa lixo no provedor).
-			await images.delete(imageId).catch(() => {
-				// Falha no cleanup do provedor não deve mascarar o 409 — engolimos.
-			});
 			throw new StorageCapExceededError();
 		}
 
-		return { id: photoId, cfImageId: imageId, createdAt };
+		// Cap reservado + row persistida → grava os bytes no R2. Se o put falhar aqui,
+		// a row e o cap já estão reservados; o auto-clean/serving lida com a ausência do
+		// objeto (o GET devolve 404). put depois do commit evita gravar lixo quando o cap
+		// estoura (caminho comum em corrida), ao custo de uma janela curta de row sem objeto.
+		await storage.put(storageKey, bytes, detected.mime);
+
+		return { id: photoId, storageKey, createdAt };
 	}
 
-	return { requestUpload, confirmUpload };
+	// ------------------------------------------------------------------------
+	// Serving — resolve a foto do evento + lê o objeto do R2.
+	// ------------------------------------------------------------------------
+	async function getPhotoFile(
+		args: GetPhotoFileArgs,
+	): Promise<StorageObject | null> {
+		const { eventSlug, photoId } = args;
+
+		// Resolve a foto garantindo que pertence ao evento do slug (evita IDOR
+		// cross-event). Não exige host: serving é público pro feed/telão (R-019 não
+		// se aplica a um photoId concreto já listado).
+		const [row] = await db
+			.select({ cfImageId: eventPhotos.cfImageId, eventSlug: events.slug })
+			.from(eventPhotos)
+			.innerJoin(events, eq(eventPhotos.eventId, events.id))
+			.where(and(eq(eventPhotos.id, photoId), eq(events.slug, eventSlug)));
+
+		if (!row) return null;
+		return storage.get(row.cfImageId);
+	}
+
+	return { uploadPhoto, getPhotoFile };
 }

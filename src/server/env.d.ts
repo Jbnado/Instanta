@@ -13,14 +13,11 @@ declare global {
 			// SEPARADA do JWT secret (NFR45). Dev local em .dev.vars; prod via
 			// `wrangler secret put MFA_ENCRYPTION_KEY`.
 			MFA_ENCRYPTION_KEY: string;
-			// Cloudflare Images (Epic 6, Stories 6.5-6.7) — opcionais porque o serviço
-			// ainda NÃO está provisionado: o adapter roda em modo STUB enquanto faltarem.
-			// Quando os três existirem (account id + token de API + hash de delivery), o
-			// adapter ativa a impl real (createSignedUploadURL/delete via CF API). Prod via
-			// `wrangler secret put CF_IMAGES_API_TOKEN`; account id/hash podem ir em vars.
-			CF_IMAGES_ACCOUNT_ID?: string;
-			CF_IMAGES_API_TOKEN?: string;
-			CF_IMAGES_ACCOUNT_HASH?: string;
+			// Storage de fotos no R2 (Epic 6 — pivot CF Images → R2 free tier). Binding
+			// declarado em wrangler.jsonc; `wrangler types` (cf-typegen) também o capta,
+			// mas declaramos aqui pra que o tipo exista mesmo sem rodar o typegen e pros
+			// testes (miniflare cria um R2 efêmero pra esse binding).
+			PHOTOS: R2Bucket;
 		}
 	}
 }

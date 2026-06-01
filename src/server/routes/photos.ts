@@ -1,14 +1,16 @@
 /**
- * Rotas de upload de foto — Epic 6 (Stories 6.5 / 6.6 / 6.7).
+ * Rotas de foto — Epic 6 (Stories 6.5 / 6.6 / 6.7), pivot CF Images → R2.
  *
  * Montadas em `/api/events`, então os paths finais são:
- *   - POST /api/events/:slug/upload-url → emite URL assinada de upload direto (6.7),
- *     após validar magic bytes + tamanho + dimensões (6.5).
- *   - POST /api/events/:slug/photos     → confirma o upload: reserva o cap (6.6, R-001)
- *     + insere a row em event_photos na mesma transação.
+ *   - POST /api/events/:slug/photos            → upload ATRAVÉS do Worker pro R2:
+ *     valida magic bytes nos bytes reais (6.5), reserva o cap (6.6, R-001) + insere
+ *     event_photos, grava no R2 (6.7). O corpo é a imagem comprimida; width/height
+ *     vêm nos query params.
+ *   - GET  /api/events/:slug/photos/:id/file   → serve o objeto do R2 (R2 não é público)
+ *     com Content-Type + cache imutável.
  *
- * Ambas exigem authMiddleware. O uploader autorizado HOJE é o host do evento Ativo;
- * a Epic 5 (convidados) expande isso no service (ver photo-service.loadActiveEventForUploader).
+ * POST exige authMiddleware (host do evento Ativo hoje; Epic 5 expande no service).
+ * GET de serving é público (feed/telão consomem) — não exige auth.
  *
  * authMiddleware roda ANTES do rate limit pra que `getKey` chaveie por user.id.
  */
@@ -16,10 +18,11 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono, type Context } from "hono";
 
 import {
-	confirmUploadSchema,
-	uploadRequestSchema,
+	ALLOWED_UPLOAD_MIMES,
+	MAX_UPLOAD_BYTES,
+	uploadPhotoQuerySchema,
 } from "../../lib/shared/schemas/photo";
-import { createCfImages } from "../adapters/cf-images";
+import { createStorage } from "../adapters/r2-storage";
 import { getDB } from "../db/client";
 import { authMiddleware } from "../middleware/auth";
 import { rateLimitMiddleware } from "../middleware/rate-limit";
@@ -41,15 +44,7 @@ export const photoRoutes = new Hono<{
 	Variables: PhotoVariables;
 }>();
 
-/** Decodifica base64 → Uint8Array (a amostra do cabeçalho vem base64 do cliente). */
-function base64ToBytes(b64: string): Uint8Array {
-	const binary = atob(b64);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	return bytes;
-}
+const ALLOWED_MIME_SET = new Set<string>(ALLOWED_UPLOAD_MIMES);
 
 /** Traduz os erros tipados do service → HTTP code + { error } (espelha routes/events). */
 function mapPhotoError(c: Context, err: unknown): Response {
@@ -69,13 +64,13 @@ function mapPhotoError(c: Context, err: unknown): Response {
 }
 
 // ============================================================================
-// POST /:slug/upload-url — validar + emitir URL assinada (Stories 6.5 + 6.7).
+// POST /:slug/photos — upload através do Worker pro R2 (Stories 6.5 + 6.6 + 6.7).
 // ============================================================================
 // authMiddleware primeiro (seta c.get('user')) → rate limit por user.id (bucket
-// 'photo-upload', 100/h generoso) → validação Zod → service. Magic bytes/size/dims
-// validados no service ANTES de emitir a URL (o Worker não vê o arquivo inteiro).
+// 'photo-upload', 100/h generoso) → handler lê os bytes do corpo + width/height da
+// query → service valida (magic bytes/size/dims), reserva o cap atômico e grava no R2.
 photoRoutes.post(
-	"/:slug/upload-url",
+	"/:slug/photos",
 	authMiddleware(),
 	rateLimitMiddleware({
 		bucket: "photo-upload",
@@ -89,56 +84,43 @@ photoRoutes.post(
 		limit: 100,
 		window: 3600, // 1h
 	}),
-	zValidator("json", uploadRequestSchema),
+	zValidator("query", uploadPhotoQuerySchema),
 	async (c) => {
-		const input = c.req.valid("json");
-		const db = getDB(c.env);
-		const images = createCfImages(c.env);
-		const service = createPhotoService({ db, images });
+		const { width, height } = c.req.valid("query");
 
-		try {
-			const result = await service.requestUpload({
-				eventSlug: c.req.param("slug"),
-				uploaderUserId: c.get("user").id,
-				headerSample: base64ToBytes(input.headerSample),
-				sizeBytes: input.sizeBytes,
-				width: input.width,
-				height: input.height,
-			});
-			return c.json(result, 200);
-		} catch (err) {
-			return mapPhotoError(c, err);
+		// Gateia o Content-Type antes de ler o corpo inteiro (a validação de verdade é
+		// magic bytes no service). Sem header válido → 415.
+		const contentType = (c.req.header("content-type") ?? "").split(";")[0]?.trim();
+		if (!contentType || !ALLOWED_MIME_SET.has(contentType)) {
+			return c.json({ error: "INVALID_IMAGE" }, 415);
 		}
-	},
-);
 
-// ============================================================================
-// POST /:slug/photos — confirmar upload (Stories 6.6 + 6.7).
-// ============================================================================
-// Reserva o cap atomicamente (CAS, R-001) + insere event_photos na mesma tx.
-// Cap estouraria → 409 CAP_EXCEEDED (+ cleanup da imagem órfã no CF Images).
-photoRoutes.post(
-	"/:slug/photos",
-	authMiddleware(),
-	zValidator("json", confirmUploadSchema),
-	async (c) => {
-		const input = c.req.valid("json");
+		const buf = await c.req.arrayBuffer();
+		const bytes = new Uint8Array(buf);
+
+		// Guard de tamanho antes de tocar no service/R2 (defesa em profundidade — o
+		// service revalida; aqui evita trabalho com payload obviamente grande).
+		if (bytes.byteLength === 0 || bytes.byteLength > MAX_UPLOAD_BYTES) {
+			return c.json({ error: "INVALID_IMAGE" }, 415);
+		}
+
 		const db = getDB(c.env);
-		const images = createCfImages(c.env);
-		const service = createPhotoService({ db, images });
+		const storage = createStorage(c.env);
+		const service = createPhotoService({ db, storage });
 
 		try {
-			const photo = await service.confirmUpload({
+			const photo = await service.uploadPhoto({
 				eventSlug: c.req.param("slug"),
 				uploaderUserId: c.get("user").id,
-				imageId: input.imageId,
-				sizeBytes: input.sizeBytes,
+				bytes,
+				width,
+				height,
 			});
 			return c.json(
 				{
 					photo: {
 						id: photo.id,
-						cfImageId: photo.cfImageId,
+						storageKey: photo.storageKey,
 						createdAt: photo.createdAt.toISOString(),
 					},
 				},
@@ -149,3 +131,31 @@ photoRoutes.post(
 		}
 	},
 );
+
+// ============================================================================
+// GET /:slug/photos/:photoId/file — serve o objeto do R2 (R2 não é público).
+// ============================================================================
+// Sem authMiddleware: feed/telão consomem publicamente. O service garante que a foto
+// pertence ao evento do slug (anti-IDOR). Cache imutável: a key é única por upload, o
+// conteúdo nunca muda, então pode cachear forte na CDN/browser.
+photoRoutes.get("/:slug/photos/:photoId/file", async (c) => {
+	const db = getDB(c.env);
+	const storage = createStorage(c.env);
+	const service = createPhotoService({ db, storage });
+
+	const obj = await service.getPhotoFile({
+		eventSlug: c.req.param("slug"),
+		photoId: c.req.param("photoId"),
+	});
+
+	if (!obj) return c.json({ error: "NOT_FOUND" }, 404);
+
+	return new Response(obj.body, {
+		status: 200,
+		headers: {
+			"content-type": obj.contentType,
+			"content-length": String(obj.size),
+			"cache-control": "public, max-age=31536000, immutable",
+		},
+	});
+});

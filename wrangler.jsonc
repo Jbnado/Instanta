@@ -80,6 +80,17 @@
 			"migrations_dir": "drizzle/migrations"
 		}
 	],
+	// Storage de fotos no R2 (Epic 6 — pivot do stub CF Images → R2 free tier: 10GB
+	// grátis + egress ZERO). Upload passa pelo Worker (PHOTOS.put) e o serving é via
+	// Worker (PHOTOS.get → GET /api/events/:slug/photos/:id/file), pois R2 não é público.
+	// PROD: o bucket precisa existir antes do deploy — `wrangler r2 bucket create instanta-photos`
+	// (R2 habilitado na conta). Ver docs/runbook.md § R2.
+	"r2_buckets": [
+		{
+			"binding": "PHOTOS",
+			"bucket_name": "instanta-photos"
+		}
+	],
 	"vars": {
 		"ENVIRONMENT": "production",
 		// workers.dev em 1º (origem que serve hoje + base dos links de invite/reset via

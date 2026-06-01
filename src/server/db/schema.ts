@@ -212,6 +212,9 @@ export const eventPhotos = sqliteTable(
 		uploaderUserId: text("uploader_user_id")
 			.notNull()
 			.references(() => users.id),
+		// Storage key do objeto no R2 (Epic 6 — pivot CF Images → R2). O nome da coluna
+		// `cf_image_id` foi MANTIDO pra evitar migration; a semântica agora é a R2 key
+		// (`events/<eventId>/<photoId>`), não mais um id do Cloudflare Images.
 		cfImageId: text("cf_image_id").notNull(),
 		// Tamanho real da foto em bytes (Story 6.6/6.7) — base do contador de cap
 		// (events.bytes_used += size no confirm) e do decremento no delete (Story 6.11).
