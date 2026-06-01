@@ -1,0 +1,7 @@
+# Torna instanta/ a raiz pnpm autossuficiente (o repo git é só este subdir).
+# Sem este arquivo, o pnpm subia pro diretório-pai (que tem um pnpm-workspace.yaml
+# herdado) e gravava o lock lá — deixando instanta/pnpm-lock.yaml órfão/stale, o
+# que quebrava `pnpm install --frozen-lockfile` no CI (que clona só instanta/).
+# `onlyBuiltDependencies` aprova o build script nativo do workerd.
+onlyBuiltDependencies:
+  - workerd

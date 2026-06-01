@@ -42,6 +42,9 @@ export function SignupForm({ onSuccess }: Props) {
 		setValue,
 		formState: { errors, isValid, isSubmitting },
 	} = useForm<SignupInput>({
+		// @ts-expect-error — @hookform/resolvers@5.4.0 (latest) fixa o literal de versão
+		// interno do zod em 4.0 (_zod.version.minor: 0), incompatível com zod@4.4.3 nos
+		// tipos. Runtime OK (testes verdes). Remover quando o resolver atualizar.
 		resolver: zodResolver(signupInputSchema),
 		mode: "onTouched",
 		defaultValues: {
