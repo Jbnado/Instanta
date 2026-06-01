@@ -457,6 +457,8 @@ describe("auth-service", () => {
 			async sendPasswordReset(args) {
 				calls.push(args);
 			},
+			// no-op: estes testes não disparam email de ativação; satisfaz o tipo Mailer.
+			async sendEventActivated() {},
 		};
 	}
 
