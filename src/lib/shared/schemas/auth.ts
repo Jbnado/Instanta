@@ -39,6 +39,20 @@ export const signupInputSchema = z.object({
 
 export type SignupInput = z.infer<typeof signupInputSchema>;
 
+// Login NÃO valida força de senha — isso é trabalho do signup. Aqui só exige
+// email válido e senha não-vazia; quem decide se as credenciais batem é o server.
+export const loginInputSchema = z.object({
+	email: z
+		.string()
+		.trim()
+		.toLowerCase()
+		.email({ message: "Email inválido." })
+		.max(254, { message: "Email muito longo." }),
+	password: z.string().min(1, { message: "Informe sua senha." }),
+});
+
+export type LoginInput = z.infer<typeof loginInputSchema>;
+
 export const userPublicSchema = z.object({
 	id: z.string(),
 	email: z.string(),
@@ -60,6 +74,7 @@ export type SignupResponse = z.infer<typeof signupResponseSchema>;
 export const AUTH_ERROR_CODES = {
 	EMAIL_EXISTS: "EMAIL_EXISTS",
 	DISPOSABLE_EMAIL: "DISPOSABLE_EMAIL",
+	INVALID_CREDENTIALS: "INVALID_CREDENTIALS",
 	RATE_LIMITED: "RATE_LIMITED",
 	VALIDATION: "VALIDATION",
 } as const;

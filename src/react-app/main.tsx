@@ -2,6 +2,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 
+import { useThemeInit } from "@/hooks/use-theme-init";
+
 import { routeTree } from "../routeTree.gen";
 import { loadClarity } from "./lib/clarity.ts";
 import "./index.css";
@@ -15,9 +17,16 @@ declare module "@tanstack/react-router" {
 	}
 }
 
+// Wrapper de bootstrap: aplica o tema resolvido (Story 2.9) ao `<html>` no
+// mount antes de renderizar o router, evitando flash de tema.
+function App() {
+	useThemeInit();
+	return <RouterProvider router={router} />;
+}
+
 createRoot(document.getElementById("root")!).render(
 	<StrictMode>
-		<RouterProvider router={router} />
+		<App />
 	</StrictMode>,
 );
 

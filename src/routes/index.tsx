@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 
+import { A11ySettings } from "@/components/feature/settings/a11y-settings";
 import { Button } from "@/components/ui/button";
+import { LogoutButton } from "@/components/feature/auth/logout-button";
 
 /**
  * Home placeholder. A UI real do feed/eventos chega nas Epics 3/5/7.
@@ -25,11 +27,17 @@ function HomePage() {
 					<Link to="/auth/signup">Criar conta</Link>
 				</Button>
 
-				{/* Login chega na Story 2.2 — desabilitado por enquanto. */}
-				<Button variant="outline" size="lg" disabled title="Em breve">
-					Entrar
+				<Button asChild variant="outline" size="lg">
+					<Link to="/auth/login">Entrar</Link>
 				</Button>
+
+				{/* Logout sempre disponível: o endpoint 401 graciosamente se não houver
+				    sessão. Affordance mínima até a Epic 3/5 trazer o header real. */}
+				<LogoutButton />
 			</div>
+
+			{/* A11ySettings (Story 2.9): por ora hospeda só o toggle de tema. */}
+			<A11ySettings />
 		</main>
 	);
 }

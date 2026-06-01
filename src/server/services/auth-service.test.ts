@@ -159,6 +159,89 @@ describe("auth-service", () => {
 		});
 	});
 
+	describe("login", () => {
+		it("credenciais corretas → cria sessão e retorna tokens", async () => {
+			await auth.signup({
+				email: "login-ok@example.com",
+				password: "senha123abc",
+				displayName: "LoginOk",
+				termsAccepted: true,
+			});
+
+			const result = await auth.login("login-ok@example.com", "senha123abc");
+
+			expect(result.user.email).toBe("login-ok@example.com");
+			expect(result.user.displayName).toBe("LoginOk");
+			expect(result.accessToken).toMatch(/^eyJ/);
+			expect(result.refreshToken).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+			expect(result.sessionId).toBeDefined();
+
+			// Nova sessão persistida com refresh hash (não plain).
+			const [row] = await db
+				.select()
+				.from(sessions)
+				.where(eq(sessions.id, result.sessionId));
+			expect(row).toBeDefined();
+			expect(row!.refreshTokenHash).toHaveLength(64);
+			expect(row!.revokedAt).toBeNull();
+		});
+
+		it("normaliza email (case-insensitive + trim) no lookup", async () => {
+			await auth.signup({
+				email: "login-case@example.com",
+				password: "senha123abc",
+				displayName: "Case",
+				termsAccepted: true,
+			});
+
+			const result = await auth.login("  LOGIN-CASE@Example.COM  ", "senha123abc");
+			expect(result.user.email).toBe("login-case@example.com");
+		});
+
+		it("senha errada → InvalidCredentialsError (genérico)", async () => {
+			await auth.signup({
+				email: "login-wrong@example.com",
+				password: "senha123abc",
+				displayName: "Wrong",
+				termsAccepted: true,
+			});
+
+			await expect(
+				auth.login("login-wrong@example.com", "senha-errada"),
+			).rejects.toThrow(/invalid email or password/i);
+		});
+
+		it("email desconhecido → InvalidCredentialsError (MESMO erro que senha errada)", async () => {
+			await expect(
+				auth.login("nao-existe@example.com", "qualquer-coisa"),
+			).rejects.toThrow(/invalid email or password/i);
+		});
+
+		it("email desconhecido e senha errada lançam o MESMO tipo de erro (anti-enumeração)", async () => {
+			await auth.signup({
+				email: "login-same@example.com",
+				password: "senha123abc",
+				displayName: "Same",
+				termsAccepted: true,
+			});
+
+			const unknownErr = await auth
+				.login("ghost@example.com", "x")
+				.then(() => null)
+				.catch((e: unknown) => e);
+			const wrongPwErr = await auth
+				.login("login-same@example.com", "errada")
+				.then(() => null)
+				.catch((e: unknown) => e);
+
+			expect(unknownErr).toBeInstanceOf(Error);
+			expect(wrongPwErr).toBeInstanceOf(Error);
+			expect((unknownErr as { code?: string }).code).toBe("INVALID_CREDENTIALS");
+			expect((wrongPwErr as { code?: string }).code).toBe("INVALID_CREDENTIALS");
+			expect((unknownErr as Error).message).toBe((wrongPwErr as Error).message);
+		});
+	});
+
 	describe("rotateRefresh", () => {
 		it("rotaciona single-use: novo par de tokens + sessão antiga revogada", async () => {
 			const initial = await auth.signup({

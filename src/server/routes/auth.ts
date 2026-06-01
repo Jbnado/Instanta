@@ -11,15 +11,16 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 
-import { signupInputSchema } from "../../lib/shared/schemas/auth";
+import { loginInputSchema, signupInputSchema } from "../../lib/shared/schemas/auth";
 import { getDB } from "../db/client";
 import { authMiddleware } from "../middleware/auth";
 import { rateLimitMiddleware } from "../middleware/rate-limit";
-import { setAuthCookies, type AuthUser } from "../lib/auth-cookies";
+import { clearAuthCookies, setAuthCookies, type AuthUser } from "../lib/auth-cookies";
 import {
 	createAuthService,
 	DisposableEmailError,
 	EmailAlreadyExistsError,
+	InvalidCredentialsError,
 } from "../services/auth-service";
 
 type AuthVariables = { user: AuthUser };
@@ -105,6 +106,84 @@ authRoutes.post(
 		}
 	},
 );
+
+// ============================================================================
+// POST /login — Story 2.2.
+// ============================================================================
+// Rate limit 5/15min/IP com escalation progressiva 15min → 1h → 24h (NFR13);
+// valores em SEGUNDOS (a DO converte pra ms). Erro genérico anti-enumeração:
+// mesma resposta 401 INVALID_CREDENTIALS pra email desconhecido E senha errada.
+// Jitter mascara o delta de timing entre "user existe + verifyPassword (~244ms)"
+// e "user não existe (~5ms)".
+authRoutes.post(
+	"/login",
+	rateLimitMiddleware({
+		bucket: "login",
+		getKey: (c) =>
+			c.req.header("cf-connecting-ip") ??
+			c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
+			"unknown",
+		limit: 5,
+		window: 900, // 15min
+		escalation: [900, 3600, 86_400], // 15min → 1h → 24h
+	}),
+	zValidator("json", loginInputSchema),
+	async (c) => {
+		const input = c.req.valid("json");
+		const db = getDB(c.env);
+		const auth = createAuthService({
+			db,
+			jwtSecret: c.env.AUTH_JWT_SECRET,
+			adminEmail: c.env.ADMIN_EMAIL,
+		});
+
+		try {
+			const result = await auth.login(input.email, input.password);
+
+			setAuthCookies(c, {
+				accessToken: result.accessToken,
+				refreshToken: result.refreshToken,
+			});
+
+			await jitter();
+			return c.json(
+				{
+					user: {
+						id: result.user.id,
+						email: result.user.email,
+						displayName: result.user.displayName,
+					},
+				},
+				200,
+			);
+		} catch (err) {
+			if (err instanceof InvalidCredentialsError) {
+				await jitter();
+				return c.json({ error: "INVALID_CREDENTIALS" }, 401);
+			}
+			throw err;
+		}
+	},
+);
+
+// ============================================================================
+// POST /logout — Story 2.3.
+// ============================================================================
+// Autenticado (authMiddleware seta c.get('user')). Revoga TODAS as sessões
+// ativas do usuário (multi-device kill — NFR62) e limpa os cookies do cliente.
+authRoutes.post("/logout", authMiddleware(), async (c) => {
+	const db = getDB(c.env);
+	const auth = createAuthService({
+		db,
+		jwtSecret: c.env.AUTH_JWT_SECRET,
+		adminEmail: c.env.ADMIN_EMAIL,
+	});
+
+	await auth.logoutAllForUser(c.get("user").id);
+	clearAuthCookies(c);
+
+	return c.json({ ok: true }, 200);
+});
 
 // Rota protegida de diagnóstico (AC-7). Devolve o usuário autenticado pelo
 // authMiddleware (access válido ou rotação de refresh).

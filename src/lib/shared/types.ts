@@ -5,6 +5,7 @@
  */
 export type {
 	AuthErrorCode,
+	LoginInput,
 	SignupInput,
 	SignupResponse,
 	UserPublic,

@@ -78,6 +78,7 @@ export interface AuthService {
 	hashPassword(plain: string): Promise<string>;
 	verifyPassword(hash: string, plain: string): Promise<boolean>;
 	signup(args: SignupArgs): Promise<SignupResult>;
+	login(email: string, password: string): Promise<SignupResult>;
 	rotateRefresh(refreshTokenPlain: string): Promise<RotateRefreshResult>;
 	verifyAccessToken(token: string): Promise<AccessTokenPayload>;
 	logout(sessionId: string): Promise<void>;
@@ -100,6 +101,17 @@ export class DisposableEmailError extends Error {
 	readonly code = "DISPOSABLE_EMAIL";
 	constructor() {
 		super("Disposable email domain not allowed");
+	}
+}
+
+/**
+ * Login falhou. GENÉRICO de propósito: mesmo erro pra email inexistente e pra
+ * senha errada — não distingue (anti-enumeração no login, AC Story 2.2).
+ */
+export class InvalidCredentialsError extends Error {
+	readonly code = "INVALID_CREDENTIALS";
+	constructor() {
+		super("Invalid email or password");
 	}
 }
 
@@ -334,6 +346,36 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 		};
 	}
 
+	async function login(emailRaw: string, password: string): Promise<SignupResult> {
+		const email = normalizeEmail(emailRaw);
+
+		const rows = await db.select().from(users).where(eq(users.email, email));
+		const row = rows[0];
+
+		// Anti-enumeração: email inexistente OU senha errada → MESMO erro.
+		// (Sem verifyPassword quando o user não existe; o jitter na rota mascara
+		// o delta de timing entre as duas branches — não distinguir é o objetivo.)
+		if (!row) {
+			throw new InvalidCredentialsError();
+		}
+
+		const ok = await verifyPassword(row.passwordHash, password);
+		if (!ok) {
+			throw new InvalidCredentialsError();
+		}
+
+		const role = deriveRole(row.email, adminEmail);
+		const { sessionId, refreshToken } = await createSession(row.id);
+		const accessToken = await generateAccessToken(row.id, sessionId, role);
+
+		return {
+			user: { id: row.id, email: row.email, displayName: row.displayName, role },
+			sessionId,
+			accessToken,
+			refreshToken,
+		};
+	}
+
 	async function rotateRefresh(refreshTokenPlain: string): Promise<RotateRefreshResult> {
 		const refreshTokenHash = await sha256Hex(refreshTokenPlain);
 
@@ -429,6 +471,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 		hashPassword,
 		verifyPassword,
 		signup,
+		login,
 		rotateRefresh,
 		verifyAccessToken,
 		logout,
