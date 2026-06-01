@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-// O LoginForm passou a renderizar o `<Link>` do TanStack ("Esqueci minha senha").
+// O ResetConfirmForm usa o `<Link>` do TanStack no estado de token inválido.
 // Fora de um RouterProvider o Link quebra, então mockamos só esse export por um
 // `<a>` simples — mantém o form testável isolado, sem montar router de verdade.
 vi.mock("@tanstack/react-router", () => ({
@@ -12,19 +12,16 @@ vi.mock("@tanstack/react-router", () => ({
 	),
 }));
 
-import { LoginForm } from "./login-form";
+import { ResetConfirmForm } from "./reset-confirm-form";
 
-const VALID = {
-	email: "teste@example.com",
-	password: "senha123abc",
-};
+const TOKEN = "tok_abc123";
+const VALID_PASSWORD = "senha123abc";
 
-async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
-	await user.type(screen.getByLabelText("Email"), VALID.email);
-	await user.type(screen.getByLabelText("Senha"), VALID.password);
+function renderWithRouter(ui: ReactNode) {
+	return render(ui);
 }
 
-describe("LoginForm", () => {
+describe("ResetConfirmForm", () => {
 	beforeEach(() => {
 		vi.stubGlobal("fetch", vi.fn());
 	});
@@ -34,49 +31,35 @@ describe("LoginForm", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renderiza todos os campos", () => {
-		render(<LoginForm />);
-		expect(screen.getByLabelText("Email")).toBeInTheDocument();
-		expect(screen.getByLabelText("Senha")).toBeInTheDocument();
+	it("renderiza o campo de nova senha", () => {
+		renderWithRouter(<ResetConfirmForm token={TOKEN} />);
+		expect(screen.getByLabelText("Nova senha")).toBeInTheDocument();
 		expect(
-			screen.getByRole("button", { name: /entrar/i }),
+			screen.getByRole("button", { name: /definir nova senha/i }),
 		).toBeInTheDocument();
 	});
 
-	it("mostra erro de validação ao tocar email vazio", async () => {
-		const user = userEvent.setup();
-		render(<LoginForm />);
-
-		await user.click(screen.getByLabelText("Email"));
-		await user.tab();
-
-		await waitFor(() => {
-			expect(screen.getByText(/email inválido/i)).toBeInTheDocument();
-		});
-		expect(screen.getByRole("button", { name: /entrar/i })).toBeDisabled();
-	});
-
-	it("envia o payload correto pro endpoint ao submeter válido", async () => {
+	it("envia { token, password } pro endpoint ao submeter válido", async () => {
 		const user = userEvent.setup();
 		const fetchMock = vi
 			.mocked(fetch)
 			.mockResolvedValue(new Response(null, { status: 200 }));
 
-		render(<LoginForm onSuccess={() => {}} />);
-		await fillValidForm(user);
+		renderWithRouter(<ResetConfirmForm token={TOKEN} onSuccess={() => {}} />);
+		await user.type(screen.getByLabelText("Nova senha"), VALID_PASSWORD);
 
-		const submit = screen.getByRole("button", { name: /entrar/i });
+		const submit = screen.getByRole("button", { name: /definir nova senha/i });
 		await waitFor(() => expect(submit).toBeEnabled());
 		await user.click(submit);
 
 		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 		const [url, init] = fetchMock.mock.calls[0]!;
-		expect(url).toBe("/api/auth/login");
+		expect(url).toBe("/api/auth/reset-confirm");
 		expect(init?.method).toBe("POST");
 		expect(init?.credentials).toBe("include");
 		expect(JSON.parse(init?.body as string)).toEqual({
-			email: VALID.email,
-			password: VALID.password,
+			token: TOKEN,
+			password: VALID_PASSWORD,
 		});
 	});
 
@@ -85,45 +68,47 @@ describe("LoginForm", () => {
 		vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 200 }));
 		const onSuccess = vi.fn();
 
-		render(<LoginForm onSuccess={onSuccess} />);
-		await fillValidForm(user);
+		renderWithRouter(<ResetConfirmForm token={TOKEN} onSuccess={onSuccess} />);
+		await user.type(screen.getByLabelText("Nova senha"), VALID_PASSWORD);
 
-		const submit = screen.getByRole("button", { name: /entrar/i });
+		const submit = screen.getByRole("button", { name: /definir nova senha/i });
 		await waitFor(() => expect(submit).toBeEnabled());
 		await user.click(submit);
 
 		await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
 	});
 
-	it("mostra mensagem genérica no 401 (anti-enumeração)", async () => {
+	it("mostra 'Link expirado ou inválido' no 400 INVALID_RESET_TOKEN", async () => {
 		const user = userEvent.setup();
 		vi.mocked(fetch).mockResolvedValue(
-			new Response(JSON.stringify({ error: "INVALID_CREDENTIALS" }), {
-				status: 401,
+			new Response(JSON.stringify({ error: "INVALID_RESET_TOKEN" }), {
+				status: 400,
 				headers: { "Content-Type": "application/json" },
 			}),
 		);
 
-		render(<LoginForm onSuccess={() => {}} />);
-		await fillValidForm(user);
+		renderWithRouter(<ResetConfirmForm token={TOKEN} onSuccess={() => {}} />);
+		await user.type(screen.getByLabelText("Nova senha"), VALID_PASSWORD);
 
-		const submit = screen.getByRole("button", { name: /entrar/i });
+		const submit = screen.getByRole("button", { name: /definir nova senha/i });
 		await waitFor(() => expect(submit).toBeEnabled());
 		await user.click(submit);
 
 		await waitFor(() => {
-			expect(screen.getByText(/email ou senha inválidos/i)).toBeInTheDocument();
+			expect(
+				screen.getByText(/link expirado ou inválido/i),
+			).toBeInTheDocument();
 		});
 	});
 
-	it("mostra mensagem de rate limit no 429", async () => {
+	it("mostra rate limit no 429", async () => {
 		const user = userEvent.setup();
 		vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 429 }));
 
-		render(<LoginForm onSuccess={() => {}} />);
-		await fillValidForm(user);
+		renderWithRouter(<ResetConfirmForm token={TOKEN} onSuccess={() => {}} />);
+		await user.type(screen.getByLabelText("Nova senha"), VALID_PASSWORD);
 
-		const submit = screen.getByRole("button", { name: /entrar/i });
+		const submit = screen.getByRole("button", { name: /definir nova senha/i });
 		await waitFor(() => expect(submit).toBeEnabled());
 		await user.click(submit);
 

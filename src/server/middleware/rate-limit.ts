@@ -2,7 +2,10 @@ import type { Context, MiddlewareHandler } from "hono";
 
 interface RateLimitOptions {
 	bucket: string;
-	getKey: (c: Context<{ Bindings: Env }>) => string;
+	// getKey pode ser async: o reset (Story 2.4) chaveia por EMAIL lendo o body
+	// (`await c.req.json()`). Hono cacheia o body parseado, então o zValidator/handler
+	// downstream ainda conseguem lê-lo.
+	getKey: (c: Context<{ Bindings: Env }>) => string | Promise<string>;
 	limit: number;
 	window: number; // seconds
 	escalation?: number[]; // seconds; cresce a cada violação se presente
@@ -27,7 +30,7 @@ export function rateLimitMiddleware(
 				"Binding `RATE_LIMITER` ausente neste env (provavelmente preview). Rate limit não pode ser aplicado.",
 			);
 		}
-		const key = opts.getKey(c);
+		const key = await opts.getKey(c);
 		const id = c.env.RATE_LIMITER.idFromName(`${opts.bucket}:${key}`);
 		const stub = c.env.RATE_LIMITER.get(id);
 

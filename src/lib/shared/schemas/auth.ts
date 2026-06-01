@@ -53,6 +53,35 @@ export const loginInputSchema = z.object({
 
 export type LoginInput = z.infer<typeof loginInputSchema>;
 
+// Solicitar reset (Story 2.4): só o email. A resposta do server é IDÊNTICA pra
+// email cadastrado vs não (anti-enumeração estrita, FR65) — diferente do signup.
+export const resetRequestSchema = z.object({
+	email: z
+		.string()
+		.trim()
+		.toLowerCase()
+		.email({ message: "Email inválido." })
+		.max(254, { message: "Email muito longo." }),
+});
+
+export type ResetRequestInput = z.infer<typeof resetRequestSchema>;
+
+// Confirmar reset (Story 2.5): token (da query string do link) + nova senha,
+// mesmas regras de força do signup.
+export const resetConfirmSchema = z.object({
+	token: z.string().min(1, { message: "Token ausente." }),
+	password: z
+		.string()
+		.min(8, { message: "A senha precisa ter pelo menos 8 caracteres." })
+		.max(128, { message: "A senha está longa demais." })
+		.regex(STRONG_PASSWORD, {
+			message:
+				"Use letras + números (mínimo 8 chars) ou uma senha longa (12+ chars).",
+		}),
+});
+
+export type ResetConfirmInput = z.infer<typeof resetConfirmSchema>;
+
 export const userPublicSchema = z.object({
 	id: z.string(),
 	email: z.string(),
@@ -75,6 +104,7 @@ export const AUTH_ERROR_CODES = {
 	EMAIL_EXISTS: "EMAIL_EXISTS",
 	DISPOSABLE_EMAIL: "DISPOSABLE_EMAIL",
 	INVALID_CREDENTIALS: "INVALID_CREDENTIALS",
+	INVALID_RESET_TOKEN: "INVALID_RESET_TOKEN",
 	RATE_LIMITED: "RATE_LIMITED",
 	VALIDATION: "VALIDATION",
 } as const;

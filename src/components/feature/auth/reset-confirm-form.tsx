@@ -6,58 +6,68 @@ import { Link } from "@tanstack/react-router";
 
 import {
 	AUTH_ERROR_CODES,
-	loginInputSchema,
-	type LoginInput,
+	resetConfirmSchema,
+	type ResetConfirmInput,
 } from "@/lib/shared/schemas/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { PasswordStrengthMeter } from "./password-strength-meter";
 
 interface Props {
+	/** Token do link de reset (vem da query string `?token=`). */
+	token: string;
 	/**
-	 * Chamado no login com sucesso (HTTP 200). A rota standalone passa um
-	 * `navigate({ to: '/' })`. Default: navega pra home via `window.location`
-	 * (não depende de router, mantém o form embeddable e testável isoladamente).
+	 * Chamado no reset com sucesso (HTTP 200). A rota standalone passa um
+	 * `navigate({ to: '/auth/login' })`. Sem default: a rota é quem decide o
+	 * destino pós-sucesso, mantendo o form embeddable e testável isoladamente.
 	 */
 	onSuccess?: () => void;
 }
 
 type FormStatus =
 	| { kind: "idle" }
+	| { kind: "success" }
+	| { kind: "invalid-token" }
 	| { kind: "rate-limited" }
 	| { kind: "error"; message: string };
 
-export function LoginForm({ onSuccess }: Props) {
+export function ResetConfirmForm({ token, onSuccess }: Props) {
 	const [showPassword, setShowPassword] = useState(false);
 	const [status, setStatus] = useState<FormStatus>({ kind: "idle" });
 
 	const {
 		register,
 		handleSubmit,
+		watch,
 		formState: { errors, isValid, isSubmitting },
-	} = useForm<LoginInput>({
+	} = useForm<ResetConfirmInput>({
 		// @ts-expect-error — @hookform/resolvers@5.4.0 (latest) fixa o literal de versão
 		// interno do zod em 4.0 (_zod.version.minor: 0), incompatível com zod@4.4.3 nos
 		// tipos. Runtime OK (testes verdes). Remover quando o resolver atualizar.
-		resolver: zodResolver(loginInputSchema),
+		resolver: zodResolver(resetConfirmSchema),
 		mode: "onTouched",
 		defaultValues: {
-			email: "",
+			// Token vem da query string e viaja no payload via campo hidden registrado.
+			token,
 			password: "",
 		},
 	});
+
+	const watchedPassword = watch("password") ?? "";
 
 	const onSubmit = handleSubmit(async (data) => {
 		setStatus({ kind: "idle" });
 
 		let res: Response;
 		try {
-			res = await fetch("/api/auth/login", {
+			res = await fetch("/api/auth/reset-confirm", {
 				method: "POST",
 				credentials: "include",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(data),
+				// Envia só token + senha — exatamente o contrato do schema.
+				body: JSON.stringify({ token: data.token, password: data.password }),
 			});
 		} catch {
 			setStatus({
@@ -67,32 +77,29 @@ export function LoginForm({ onSuccess }: Props) {
 			return;
 		}
 
-		// 200 → login ok, cookies setados pelo servidor.
+		// 200 → senha trocada, sessões antigas revogadas pelo servidor.
 		if (res.status === 200) {
+			setStatus({ kind: "success" });
 			if (onSuccess) onSuccess();
-			else window.location.assign("/");
 			return;
 		}
 
-		// 429 → rate limit (NFR13). Mensagem humana, sem pânico.
+		// 429 → rate limit (NFR13). Sem infra de toast no projeto ainda; usamos o
+		// mesmo padrão de alerta inline de login/signup.
 		if (res.status === 429) {
 			setStatus({ kind: "rate-limited" });
 			return;
 		}
 
-		// 401 → credenciais inválidas. Mensagem GENÉRICA (anti-enumeração): não
-		// distingue email-não-existe de senha-errada. Mostrada como status global,
-		// não num campo específico, pra não vazar qual campo está "errado".
-		if (res.status === 401) {
-			setStatus({
-				kind: "error",
-				message: "Email ou senha inválidos.",
-			});
-			return;
-		}
-
-		// 400 → validação server-side (defensivo; o front já barra via Zod).
+		// 400 INVALID_RESET_TOKEN → token expirado/inválido/já usado (Story 2.5).
 		if (res.status === 400) {
+			const body = (await res.json().catch(() => null)) as
+				| { error?: string }
+				| null;
+			if (body?.error === AUTH_ERROR_CODES.INVALID_RESET_TOKEN) {
+				setStatus({ kind: "invalid-token" });
+				return;
+			}
 			setStatus({
 				kind: "error",
 				message: "Confere os dados do formulário e tenta de novo.",
@@ -107,45 +114,56 @@ export function LoginForm({ onSuccess }: Props) {
 		});
 	});
 
-	// Referência a AUTH_ERROR_CODES mantém o contrato front↔back explícito mesmo
-	// sem mapear por campo (o 401 já carrega a semântica INVALID_CREDENTIALS).
-	void AUTH_ERROR_CODES.INVALID_CREDENTIALS;
+	// Sucesso: confirma e some com o form (a rota navega pro login via onSuccess).
+	if (status.kind === "success") {
+		return (
+			<div
+				role="status"
+				className="rounded-lg bg-muted px-4 py-5 text-center text-sm text-foreground"
+			>
+				<p className="font-medium">Senha redefinida com sucesso.</p>
+				<p className="mt-2 text-muted-foreground">
+					Você já pode entrar com a nova senha.
+				</p>
+			</div>
+		);
+	}
+
+	// Token inválido/expirado: oferece recomeçar o fluxo.
+	if (status.kind === "invalid-token") {
+		return (
+			<div
+				role="alert"
+				className="space-y-3 rounded-lg bg-destructive/10 px-4 py-5 text-center text-sm text-destructive"
+			>
+				<p className="font-medium">Link expirado ou inválido. Solicite um novo.</p>
+				<Link
+					to="/auth/reset"
+					className="inline-block font-medium underline underline-offset-4"
+				>
+					Solicitar novo link
+				</Link>
+			</div>
+		);
+	}
 
 	return (
 		<form onSubmit={onSubmit} noValidate className="space-y-5">
-			{/* Email */}
-			<div className="space-y-1.5">
-				<Label htmlFor="login-email">Email</Label>
-				<Input
-					id="login-email"
-					type="email"
-					autoComplete="email"
-					autoCapitalize="none"
-					spellCheck={false}
-					placeholder="voce@exemplo.com"
-					aria-invalid={errors.email ? true : undefined}
-					aria-describedby={errors.email ? "login-email-error" : undefined}
-					{...register("email")}
-				/>
-				{errors.email ? (
-					<p id="login-email-error" className="text-sm text-destructive">
-						{errors.email.message}
-					</p>
-				) : null}
-			</div>
+			{/* Token: campo hidden registrado, viaja no payload. */}
+			<input type="hidden" {...register("token")} />
 
-			{/* Senha */}
+			{/* Nova senha */}
 			<div className="space-y-1.5">
-				<Label htmlFor="login-password">Senha</Label>
+				<Label htmlFor="reset-confirm-password">Nova senha</Label>
 				<div className="relative">
 					<Input
-						id="login-password"
+						id="reset-confirm-password"
 						type={showPassword ? "text" : "password"}
-						autoComplete="current-password"
+						autoComplete="new-password"
 						className="pr-11"
 						aria-invalid={errors.password ? true : undefined}
 						aria-describedby={
-							errors.password ? "login-password-error" : undefined
+							errors.password ? "reset-confirm-password-error" : undefined
 						}
 						{...register("password")}
 					/>
@@ -164,22 +182,17 @@ export function LoginForm({ onSuccess }: Props) {
 					</button>
 				</div>
 				{errors.password ? (
-					<p id="login-password-error" className="text-sm text-destructive">
+					<p
+						id="reset-confirm-password-error"
+						className="text-sm text-destructive"
+					>
 						{errors.password.message}
 					</p>
 				) : null}
-				{/* Atalho pro fluxo de reset (Story 2.4). */}
-				<div className="text-right">
-					<Link
-						to="/auth/reset"
-						className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-					>
-						Esqueci minha senha
-					</Link>
-				</div>
+				<PasswordStrengthMeter password={watchedPassword} />
 			</div>
 
-			{/* Status global (rate limit / credenciais inválidas / erro de servidor) */}
+			{/* Status global (rate limit / erro de servidor). */}
 			{status.kind === "rate-limited" ? (
 				<p
 					role="alert"
@@ -205,7 +218,7 @@ export function LoginForm({ onSuccess }: Props) {
 				className="w-full"
 				disabled={!isValid || isSubmitting}
 			>
-				{isSubmitting ? "Entrando…" : "Entrar"}
+				{isSubmitting ? "Salvando…" : "Definir nova senha"}
 			</Button>
 		</form>
 	);

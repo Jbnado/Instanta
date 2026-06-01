@@ -29,8 +29,9 @@ setWASMModules({
 });
 
 import type { DB } from "../db/client";
-import { sessions, users } from "../db/schema";
+import { passwordResetTokens, sessions, users } from "../db/schema";
 import { isDisposableEmail } from "../../lib/shared/disposable-emails";
+import type { Mailer } from "./mailer";
 
 // ============================================================================
 // Tipos
@@ -72,6 +73,10 @@ export interface AuthServiceDeps {
 	adminEmail?: string;
 	/** Clock injetável para testes determinísticos. */
 	now?: () => Date;
+	/** Mailer pra envio de email de reset (Story 2.4). Stub no MVP; Resend no Epic 4. */
+	mailer?: Mailer;
+	/** Base URL pública pra montar o link de reset. Default: domínio de produção. */
+	appBaseUrl?: string;
 }
 
 export interface AuthService {
@@ -84,6 +89,18 @@ export interface AuthService {
 	logout(sessionId: string): Promise<void>;
 	logoutAllForUser(userId: string): Promise<void>;
 	getUserById(userId: string): Promise<SignupResult["user"] | null>;
+	/**
+	 * Solicita reset (Story 2.4). Sempre resolve void SEM sinal distinguível entre
+	 * email cadastrado e não (anti-enumeração estrita, FR65) — o jitter na rota
+	 * mascara o delta de timing. Só gera token + dispara email se o user existir.
+	 */
+	requestPasswordReset(email: string): Promise<void>;
+	/**
+	 * Confirma reset (Story 2.5). Token válido (não expirado, não usado) → atualiza
+	 * hash de senha, marca single-use, revoga TODAS as sessões. Caso contrário lança
+	 * InvalidResetTokenError.
+	 */
+	confirmPasswordReset(token: string, newPassword: string): Promise<void>;
 }
 
 // ============================================================================
@@ -129,12 +146,26 @@ export class SessionNotFoundError extends Error {
 	}
 }
 
+/**
+ * Reset token inválido: inexistente, expirado OU já usado. GENÉRICO de propósito
+ * (não distingue qual caso) — a rota traduz pra microcopy "link expirado ou inválido".
+ */
+export class InvalidResetTokenError extends Error {
+	readonly code = "INVALID_RESET_TOKEN";
+	constructor() {
+		super("Reset token is invalid, expired or already used");
+	}
+}
+
 // ============================================================================
 // Constantes
 // ============================================================================
 
 const ACCESS_TOKEN_TTL_S = 15 * 60; // 15min
 const REFRESH_TOKEN_TTL_S = 30 * 24 * 60 * 60; // 30 dias
+const RESET_TOKEN_TTL_S = 30 * 60; // 30min (NFR43, lifetime ≤30min)
+// Domínio público default pro link de reset quando appBaseUrl não vem nas deps.
+const DEFAULT_APP_BASE_URL = "https://instanta.jbnado.dev";
 // NFR10: argon2id memory ≥64MB, time ≥3, parallelism ≥4.
 // Lib: argon2-wasm-edge (WASM importado como módulo ES, ~50-150ms em workerd).
 // @noble/hashes (pura JS) era correto mas ~2.6s/hash em Node e >5s em workerd (timeout).
@@ -250,7 +281,14 @@ function deriveRole(email: string, adminEmail: string | undefined): "user" | "ad
 // ============================================================================
 
 export function createAuthService(deps: AuthServiceDeps): AuthService {
-	const { db, jwtSecret, adminEmail, now = () => new Date() } = deps;
+	const {
+		db,
+		jwtSecret,
+		adminEmail,
+		now = () => new Date(),
+		mailer,
+		appBaseUrl = DEFAULT_APP_BASE_URL,
+	} = deps;
 
 	async function hashPassword(plain: string): Promise<string> {
 		const salt = new Uint8Array(16);
@@ -455,6 +493,66 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 			.where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
 	}
 
+	async function requestPasswordReset(emailRaw: string): Promise<void> {
+		const email = normalizeEmail(emailRaw);
+
+		const rows = await db.select().from(users).where(eq(users.email, email));
+		const row = rows[0];
+
+		// Anti-enumeração (FR65): se não existe, retorna void silenciosamente — sem
+		// token, sem email, sem throw. A rota aplica jitter pra timing constante.
+		if (!row) return;
+
+		// Token ≥128 bits (32 bytes), armazenado só como SHA-256 hex (plain só no link).
+		const token = randomBase64UrlBytes(32);
+		const tokenHash = await sha256Hex(token);
+		const expiresAt = new Date(now().getTime() + RESET_TOKEN_TTL_S * 1000);
+
+		await db.insert(passwordResetTokens).values({
+			id: crypto.randomUUID(),
+			userId: row.id,
+			tokenHash,
+			expiresAt,
+			createdAt: now(),
+		});
+
+		const resetUrl = `${appBaseUrl}/auth/reset-confirm?token=${token}`;
+		// mailer é opcional na tipagem (deps); em rotas reais sempre vem injetado.
+		await mailer?.sendPasswordReset({ to: email, resetUrl });
+	}
+
+	async function confirmPasswordReset(token: string, newPassword: string): Promise<void> {
+		const tokenHash = await sha256Hex(token);
+
+		// Token válido = existe, não usado, não expirado. Genérico: qualquer falha → mesmo erro.
+		const rows = await db
+			.select()
+			.from(passwordResetTokens)
+			.where(
+				and(
+					eq(passwordResetTokens.tokenHash, tokenHash),
+					isNull(passwordResetTokens.usedAt),
+				),
+			);
+		const tokenRow = rows[0];
+		if (!tokenRow || tokenRow.expiresAt.getTime() <= now().getTime()) {
+			throw new InvalidResetTokenError();
+		}
+
+		const newHash = await hashPassword(newPassword);
+
+		// Atualiza senha, marca single-use e revoga todas as sessões (NFR43).
+		await db
+			.update(users)
+			.set({ passwordHash: newHash })
+			.where(eq(users.id, tokenRow.userId));
+		await db
+			.update(passwordResetTokens)
+			.set({ usedAt: now() })
+			.where(eq(passwordResetTokens.id, tokenRow.id));
+		await logoutAllForUser(tokenRow.userId);
+	}
+
 	async function getUserById(userId: string): Promise<SignupResult["user"] | null> {
 		const rows = await db.select().from(users).where(eq(users.id, userId));
 		const row = rows[0];
@@ -477,5 +575,7 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 		logout,
 		logoutAllForUser,
 		getUserById,
+		requestPasswordReset,
+		confirmPasswordReset,
 	};
 }

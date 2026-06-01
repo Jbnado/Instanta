@@ -11,16 +11,24 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 
-import { loginInputSchema, signupInputSchema } from "../../lib/shared/schemas/auth";
+import {
+	loginInputSchema,
+	resetConfirmSchema,
+	resetRequestSchema,
+	signupInputSchema,
+} from "../../lib/shared/schemas/auth";
 import { getDB } from "../db/client";
 import { authMiddleware } from "../middleware/auth";
 import { rateLimitMiddleware } from "../middleware/rate-limit";
 import { clearAuthCookies, setAuthCookies, type AuthUser } from "../lib/auth-cookies";
+import { getAllowedOrigins } from "../middleware/cors";
+import { createMailer } from "../services/mailer";
 import {
 	createAuthService,
 	DisposableEmailError,
 	EmailAlreadyExistsError,
 	InvalidCredentialsError,
+	InvalidResetTokenError,
 } from "../services/auth-service";
 
 type AuthVariables = { user: AuthUser };
@@ -160,6 +168,82 @@ authRoutes.post(
 			if (err instanceof InvalidCredentialsError) {
 				await jitter();
 				return c.json({ error: "INVALID_CREDENTIALS" }, 401);
+			}
+			throw err;
+		}
+	},
+);
+
+// ============================================================================
+// POST /reset — Story 2.4 (solicitar reset).
+// ============================================================================
+// Anti-enumeração ESTRITA (FR65): resposta 200 idêntica pra email cadastrado e não.
+// Rate limit 3/hora por EMAIL (NFR13) — getKey async lê o body (Hono cacheia o
+// JSON parseado, então o zValidator downstream ainda consegue lê-lo). Jitter em
+// TODAS as branches pra timing constante (defesa contra timing attack).
+authRoutes.post(
+	"/reset",
+	rateLimitMiddleware({
+		bucket: "reset",
+		getKey: async (c) => {
+			const body = (await c.req.json().catch(() => ({}))) as { email?: unknown };
+			return typeof body.email === "string" ? body.email.trim().toLowerCase() : "unknown";
+		},
+		limit: 3,
+		window: 3600,
+	}),
+	zValidator("json", resetRequestSchema),
+	async (c) => {
+		const input = c.req.valid("json");
+		const db = getDB(c.env);
+		const auth = createAuthService({
+			db,
+			jwtSecret: c.env.AUTH_JWT_SECRET,
+			adminEmail: c.env.ADMIN_EMAIL,
+			mailer: createMailer(c.env),
+			appBaseUrl: getAllowedOrigins(c.env)[0],
+		});
+
+		await auth.requestPasswordReset(input.email);
+
+		// Jitter mascara o delta entre branch "user existe" (token + email) e "não existe".
+		await jitter();
+		return c.json(
+			{
+				message:
+					"Se este email estiver cadastrado, você receberá um link em até 5 minutos.",
+			},
+			200,
+		);
+	},
+);
+
+// ============================================================================
+// POST /reset-confirm — Story 2.5 (confirmar reset).
+// ============================================================================
+// Token válido + nova senha → atualiza hash, single-use, revoga todas as sessões.
+// Token inválido/expirado/usado → 400 INVALID_RESET_TOKEN ("link expirado ou inválido").
+// Limpa cookies de auth por garantia (sessões já foram revogadas no service).
+authRoutes.post(
+	"/reset-confirm",
+	zValidator("json", resetConfirmSchema),
+	async (c) => {
+		const input = c.req.valid("json");
+		const db = getDB(c.env);
+		const auth = createAuthService({
+			db,
+			jwtSecret: c.env.AUTH_JWT_SECRET,
+			adminEmail: c.env.ADMIN_EMAIL,
+			mailer: createMailer(c.env),
+		});
+
+		try {
+			await auth.confirmPasswordReset(input.token, input.password);
+			clearAuthCookies(c);
+			return c.json({ ok: true }, 200);
+		} catch (err) {
+			if (err instanceof InvalidResetTokenError) {
+				return c.json({ error: "INVALID_RESET_TOKEN" }, 400);
 			}
 			throw err;
 		}

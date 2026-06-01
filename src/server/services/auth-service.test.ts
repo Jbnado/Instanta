@@ -3,8 +3,13 @@ import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { getDB } from "../db/client";
-import { sessions, users } from "../db/schema";
-import { createAuthService, type AuthService } from "./auth-service";
+import { passwordResetTokens, sessions, users } from "../db/schema";
+import {
+	createAuthService,
+	InvalidResetTokenError,
+	type AuthService,
+} from "./auth-service";
+import type { Mailer, SendPasswordResetArgs } from "./mailer";
 
 const TEST_JWT_SECRET = "test-secret-aaaa-bbbb-cccc-dddd-eeee-ffff-32-bytes";
 
@@ -314,6 +319,176 @@ describe("auth-service", () => {
 			// muta o último char (assinatura).
 			const tampered = result.accessToken.slice(0, -1) + "X";
 			await expect(auth.verifyAccessToken(tampered)).rejects.toThrow();
+		});
+	});
+
+	// Fake mailer que captura as chamadas — sem rede, determinístico.
+	function makeFakeMailer(): Mailer & { calls: SendPasswordResetArgs[] } {
+		const calls: SendPasswordResetArgs[] = [];
+		return {
+			calls,
+			async sendPasswordReset(args) {
+				calls.push(args);
+			},
+		};
+	}
+
+	describe("requestPasswordReset", () => {
+		it("email cadastrado → cria token row + chama mailer com resetUrl contendo o token", async () => {
+			const mailer = makeFakeMailer();
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+
+			await svc.signup({
+				email: "reset-req@example.com",
+				password: "senha123abc",
+				displayName: "Req",
+				termsAccepted: true,
+			});
+
+			await svc.requestPasswordReset("reset-req@example.com");
+
+			const [userRow] = await db
+				.select()
+				.from(users)
+				.where(eq(users.email, "reset-req@example.com"));
+			const tokenRows = await db
+				.select()
+				.from(passwordResetTokens)
+				.where(eq(passwordResetTokens.userId, userRow!.id));
+			expect(tokenRows).toHaveLength(1);
+			expect(tokenRows[0]!.tokenHash).toHaveLength(64); // SHA-256 hex
+			expect(tokenRows[0]!.usedAt).toBeNull();
+			// Expiração no futuro e ≤30min.
+			const ttlMs = tokenRows[0]!.expiresAt.getTime() - Date.now();
+			expect(ttlMs).toBeGreaterThan(0);
+			expect(ttlMs).toBeLessThanOrEqual(30 * 60 * 1000 + 1000);
+
+			expect(mailer.calls).toHaveLength(1);
+			expect(mailer.calls[0]!.to).toBe("reset-req@example.com");
+			expect(mailer.calls[0]!.resetUrl).toMatch(/token=/);
+		});
+
+		it("email desconhecido → não cria token, não chama mailer, não lança", async () => {
+			const mailer = makeFakeMailer();
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+
+			await expect(
+				svc.requestPasswordReset("ninguem@example.com"),
+			).resolves.toBeUndefined();
+
+			expect(mailer.calls).toHaveLength(0);
+			const all = await db.select().from(passwordResetTokens);
+			const forUnknown = all.filter((r) => r.usedAt === undefined);
+			expect(forUnknown).not.toContain("ninguem@example.com"); // sanity: nenhum token vinculado
+		});
+
+		it("normaliza email (case-insensitive) no lookup", async () => {
+			const mailer = makeFakeMailer();
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+
+			await svc.signup({
+				email: "reset-case@example.com",
+				password: "senha123abc",
+				displayName: "Case",
+				termsAccepted: true,
+			});
+
+			await svc.requestPasswordReset("  RESET-CASE@Example.COM ");
+			expect(mailer.calls).toHaveLength(1);
+		});
+	});
+
+	describe("confirmPasswordReset", () => {
+		// Helper: faz signup + request reset capturando o token plaintext via mailer,
+		// e devolve o token + o id do usuário pra assertions.
+		async function setupReset(email: string): Promise<{
+			svc: AuthService;
+			token: string;
+			userId: string;
+			mailer: ReturnType<typeof makeFakeMailer>;
+		}> {
+			const mailer = makeFakeMailer();
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+			await svc.signup({
+				email,
+				password: "senha123abc",
+				displayName: "Confirm",
+				termsAccepted: true,
+			});
+			await svc.requestPasswordReset(email);
+			const url = new URL(mailer.calls[0]!.resetUrl);
+			const token = url.searchParams.get("token")!;
+			const [userRow] = await db.select().from(users).where(eq(users.email, email));
+			return { svc, token, userId: userRow!.id, mailer };
+		}
+
+		it("token válido → atualiza hash, marca usedAt, revoga todas as sessões", async () => {
+			const { svc, token, userId } = await setupReset("reset-ok@example.com");
+
+			await svc.confirmPasswordReset(token, "novaSenha456");
+
+			// Nova senha vale, antiga não.
+			const [userRow] = await db.select().from(users).where(eq(users.id, userId));
+			expect(await svc.verifyPassword(userRow!.passwordHash, "novaSenha456")).toBe(true);
+			expect(await svc.verifyPassword(userRow!.passwordHash, "senha123abc")).toBe(false);
+
+			// Token marcado single-use.
+			const tokenRows = await db
+				.select()
+				.from(passwordResetTokens)
+				.where(eq(passwordResetTokens.userId, userId));
+			expect(tokenRows[0]!.usedAt).not.toBeNull();
+
+			// Todas as sessões revogadas.
+			const sessionRows = await db
+				.select()
+				.from(sessions)
+				.where(eq(sessions.userId, userId));
+			expect(sessionRows.length).toBeGreaterThan(0);
+			expect(sessionRows.every((s) => s.revokedAt !== null)).toBe(true);
+		});
+
+		it("token expirado → InvalidResetTokenError", async () => {
+			// Clock fixo no passado pro request, depois confirm com clock atual.
+			const mailer = makeFakeMailer();
+			const past = new Date(Date.now() - 31 * 60 * 1000); // 31min atrás
+			const svcPast = createAuthService({
+				db,
+				jwtSecret: TEST_JWT_SECRET,
+				mailer,
+				now: () => past,
+			});
+			await svcPast.signup({
+				email: "reset-expired@example.com",
+				password: "senha123abc",
+				displayName: "Exp",
+				termsAccepted: true,
+			});
+			await svcPast.requestPasswordReset("reset-expired@example.com");
+			const token = new URL(mailer.calls[0]!.resetUrl).searchParams.get("token")!;
+
+			// Confirm com clock atual → token expirou (criado 31min atrás, TTL 30min).
+			const svcNow = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+			await expect(
+				svcNow.confirmPasswordReset(token, "novaSenha456"),
+			).rejects.toBeInstanceOf(InvalidResetTokenError);
+		});
+
+		it("token já usado → InvalidResetTokenError (single-use)", async () => {
+			const { svc, token } = await setupReset("reset-used@example.com");
+
+			await svc.confirmPasswordReset(token, "novaSenha456");
+			await expect(
+				svc.confirmPasswordReset(token, "outraSenha789"),
+			).rejects.toBeInstanceOf(InvalidResetTokenError);
+		});
+
+		it("token inexistente → InvalidResetTokenError", async () => {
+			const mailer = makeFakeMailer();
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, mailer });
+			await expect(
+				svc.confirmPasswordReset("token-que-nao-existe-xxxxxxxx", "novaSenha456"),
+			).rejects.toBeInstanceOf(InvalidResetTokenError);
 		});
 	});
 });

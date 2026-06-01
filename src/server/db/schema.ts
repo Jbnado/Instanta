@@ -63,6 +63,29 @@ export const sessions = sqliteTable(
 	(t) => [index("idx_sessions_user_id").on(t.userId)],
 );
 
+// Tokens de reset de senha (Story 2.4/2.5). Espelha o estilo de `sessions`:
+// guardamos só o SHA-256 hex do token (NFR43, single-use ≤30min, ≥128 bits).
+// O plaintext só vai no link do email — nunca é persistido nem logado em prod.
+export const passwordResetTokens = sqliteTable(
+	"password_reset_tokens",
+	{
+		id: text("id").primaryKey().$defaultFn(uuidv7),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.id),
+		// SHA-256 hex do token plaintext (como sessions.refreshTokenHash).
+		tokenHash: text("token_hash").notNull(),
+		// Expiração ≤30min após criação (NFR43). Após isso o token é inválido.
+		expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+		// Marca single-use: preenchido no confirm; token usado nunca mais vale.
+		usedAt: integer("used_at", { mode: "timestamp" }),
+		createdAt: integer("created_at", { mode: "timestamp" })
+			.notNull()
+			.default(sql`(unixepoch())`),
+	},
+	(t) => [index("idx_password_reset_tokens_token_hash").on(t.tokenHash)],
+);
+
 export const userMfaSecrets = sqliteTable("user_mfa_secrets", {
 	userId: text("user_id")
 		.primaryKey()
