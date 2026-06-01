@@ -36,7 +36,6 @@ function baseInput(overrides: Partial<CreateEventInput> = {}): CreateEventInput 
 		name: "Festa da Ana",
 		eventDate: new Date("2026-07-15T20:00:00Z"),
 		description: "Aniversário de 30 anos",
-		password: "festa2026",
 		colorAccent: "#A855F7",
 		presetMissionIds: [],
 		customMissions: [],
@@ -75,7 +74,6 @@ describe("event-service", () => {
 			expect(row!.cap).toBe(10_737_418_240);
 			expect(row!.bytesUsed).toBe(0);
 			expect(row!.hostUserId).toBe(hostId);
-			expect(row!.passwordHash).toMatch(/^\$argon2id\$/);
 			expect(row!.eventDate).toBeInstanceOf(Date);
 			expect(row!.eventDate.getTime()).toBe(
 				new Date("2026-07-15T20:00:00Z").getTime(),
@@ -293,21 +291,6 @@ describe("event-service", () => {
 			const [row] = await db.select().from(events).where(eq(events.id, created.id));
 			expect(row!.name).toBe("Festa Renomeada");
 			expect(row!.colorAccent).toBe("#22C55E");
-		});
-
-		it("com password rotaciona o passwordHash (novo $argon2id$, diferente do antigo)", async () => {
-			const hostId = await makeHost(db, "upd-pwd@example.com");
-			const created = await service.createEvent({
-				hostUserId: hostId,
-				input: baseInput(),
-			});
-			const [before] = await db.select().from(events).where(eq(events.id, created.id));
-
-			await service.updateEvent(created.slug, hostId, { password: "novasenha456" });
-
-			const [after] = await db.select().from(events).where(eq(events.id, created.id));
-			expect(after!.passwordHash).toMatch(/^\$argon2id\$/);
-			expect(after!.passwordHash).not.toBe(before!.passwordHash);
 		});
 
 		it("substitui o conjunto de missões (antigas somem, novas com isPreset correto)", async () => {

@@ -24,12 +24,8 @@ export const createEventSchema = z.object({
 		.trim()
 		.max(500, { message: "Descrição muito longa (máx 500)." })
 		.optional(),
-	// Senha do evento: código compartilhado entre convidados — regra leve (≠ senha
-	// pessoal do signup). Só não-trivial.
-	password: z
-		.string()
-		.min(4, { message: "A senha do evento precisa de pelo menos 4 caracteres." })
-		.max(64, { message: "Senha do evento longa demais (máx 64)." }),
+	// Sem senha de evento: o convidado SEMPRE entra pelo URL (QR ou link), então o
+	// slug aleatório (≥60 bits, R-019) JÁ é o segredo de acesso. Removido em 2026-06-01.
 	colorAccent: z.enum(ACCENT_HEXES).default(DEFAULT_ACCENT_HEX),
 	presetMissionIds: z.array(z.enum(MISSION_PRESET_IDS)).default([]),
 	customMissions: z
@@ -51,15 +47,13 @@ export type CreateEventInput = z.infer<typeof createEventSchema>;
 /**
  * Edição de evento (Story 3.2, FR13). Update parcial — todos os campos opcionais.
  * Quando `presetMissionIds`/`customMissions` vêm, o conjunto de missões é SUBSTITUÍDO.
- * Quando `password` vem, o backend rotaciona o hash + revoga sessões de convidado
- * baseadas na senha antiga (hook de revogação chega de fato na Epic 5).
+ * (Sem senha de evento — acesso é via URL/slug; removido em 2026-06-01.)
  */
 export const updateEventSchema = z
 	.object({
 		name: z.string().trim().min(1).max(80).optional(),
 		eventDate: z.coerce.date().optional(),
 		description: z.string().trim().max(500).optional(),
-		password: z.string().min(4).max(64).optional(),
 		colorAccent: z.enum(ACCENT_HEXES).optional(),
 		presetMissionIds: z.array(z.enum(MISSION_PRESET_IDS)).optional(),
 		customMissions: z.array(z.string().trim().min(1).max(80)).max(10).optional(),

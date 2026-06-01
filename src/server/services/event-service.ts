@@ -3,8 +3,7 @@
  *
  * Serviço puro: não importa hono, c.env ou middleware. Recebe deps via factory pra
  * teste isolado. Toda a lógica de criação (limite de eventos ativos, geração de slug,
- * hash da senha do evento, inserts de evento + missões) vive aqui — o handler HTTP
- * (`routes/events.ts`) fica fino.
+ * inserts de evento + missões) vive aqui — o handler HTTP (`routes/events.ts`) fica fino.
  *
  * Convenções (espelha auth-service):
  * - Erros tipados; a rota traduz pra HTTP code + microcopy.
@@ -16,7 +15,6 @@ import type { BatchItem } from "drizzle-orm/batch";
 
 import type { DB } from "../db/client";
 import { eventMissions, events, users } from "../db/schema";
-import { hashPassword } from "../lib/password";
 import { presetLabelById } from "../../lib/shared/mission-presets";
 import type {
 	CreateEventInput,
@@ -110,9 +108,8 @@ export interface EventService {
 	getEventForHost(slug: string, hostUserId: string): Promise<EventDetail | null>;
 	/**
 	 * Atualização parcial de evento (Story 3.2, FR13). Lança EventNotFoundError se o
-	 * slug não existe ou não é do anfitrião. Rotaciona o hash da senha quando `password`
-	 * presente; substitui o conjunto de missões quando `presetMissionIds`/`customMissions`
-	 * presentes. Retorna o EventDetail atualizado.
+	 * slug não existe ou não é do anfitrião. Substitui o conjunto de missões quando
+	 * `presetMissionIds`/`customMissions` presentes. Retorna o EventDetail atualizado.
 	 */
 	updateEvent(
 		slug: string,
@@ -244,16 +241,13 @@ export function createEventService(deps: EventServiceDeps): EventService {
 			throw new ActiveEventLimitError();
 		}
 
-		// 2. Slug aleatório unguessable (R-019).
+		// 2. Slug aleatório unguessable (R-019) — é o próprio segredo de acesso ao evento.
 		const slug = await generateUniqueSlug();
-
-		// 3. Hash da senha do evento (argon2id compartilhado).
-		const passwordHash = await hashPassword(input.password);
 
 		const eventId = crypto.randomUUID();
 		const createdAt = now();
 
-		// 4. Monta as linhas de missões: presets (label resolvido pelo id, isPreset true)
+		// 3. Monta as linhas de missões: presets (label resolvido pelo id, isPreset true)
 		//    + customs (label = texto já trimado pelo Zod, isPreset false).
 		const presetIds = input.presetMissionIds ?? [];
 		const customMissions = input.customMissions ?? [];
@@ -276,12 +270,11 @@ export function createEventService(deps: EventServiceDeps): EventService {
 			})),
 		];
 
-		// 5. Insere evento + missões atomicamente via db.batch (transação D1).
+		// 4. Insere evento + missões atomicamente via db.batch (transação D1).
 		const insertEvent = db.insert(events).values({
 			id: eventId,
 			slug,
 			name: input.name,
-			passwordHash,
 			colorAccent: input.colorAccent,
 			description: input.description ?? null,
 			eventDate: input.eventDate,
@@ -419,14 +412,6 @@ export function createEventService(deps: EventServiceDeps): EventService {
 		if (input.description !== undefined)
 			eventPatch.description = input.description ?? null;
 		if (input.colorAccent !== undefined) eventPatch.colorAccent = input.colorAccent;
-		if (input.password !== undefined) {
-			// Rotaciona o hash da senha do evento (argon2id compartilhado).
-			eventPatch.passwordHash = await hashPassword(input.password);
-			// TODO Epic 5: revogar as sessões de convidado baseadas na senha ANTIGA.
-			// As sessões escopadas a evento/convidado ainda não existem (chegam na Epic 5),
-			// então não há linhas a revogar hoje. Quando existirem, revogar aqui na MESMA
-			// transação do update (db.batch) usando o eventId + o instante da rotação.
-		}
 
 		// 2. Decide se o conjunto de missões será substituído (qualquer um dos dois
 		//    arrays presente dispara o replace completo — Story 3.2).

@@ -127,7 +127,6 @@ export const events = sqliteTable(
 		id: text("id").primaryKey().$defaultFn(uuidv7),
 		slug: text("slug").notNull(),
 		name: text("name").notNull(),
-		passwordHash: text("password_hash").notNull(),
 		colorAccent: text("color_accent").notNull(),
 		// Descrição opcional do evento (texto livre, mostrada ao convidado) — Story 3.1.
 		description: text("description"),

@@ -70,7 +70,6 @@ function eventBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 		name: "Festa da Ana",
 		eventDate: "2026-07-15T20:00:00.000Z",
 		description: "Aniversário",
-		password: "festa2026",
 		colorAccent: "#A855F7",
 		presetMissionIds: ["selfie-anfitriao"],
 		customMissions: ["Foto com o bolo"],

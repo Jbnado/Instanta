@@ -8,14 +8,12 @@ import { DEFAULT_ACCENT_HEX } from "@/lib/shared/event-palette";
 const VALID = {
 	name: "Aniversário da Ana",
 	date: "2026-12-31",
-	password: "festa123",
 };
 
 /** Preenche os campos obrigatórios mínimos pra deixar o form válido. */
 async function fillRequired(user: ReturnType<typeof userEvent.setup>) {
 	await user.type(screen.getByLabelText("Nome do evento"), VALID.name);
 	await user.type(screen.getByLabelText("Data do evento"), VALID.date);
-	await user.type(screen.getByLabelText("Senha do evento"), VALID.password);
 }
 
 describe("CreateEventForm", () => {
@@ -28,11 +26,11 @@ describe("CreateEventForm", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renderiza nome, data, senha, swatches de cor e checkboxes de preset", () => {
+	it("renderiza nome, data, swatches de cor e checkboxes de preset", () => {
 		render(<CreateEventForm />);
 		expect(screen.getByLabelText("Nome do evento")).toBeInTheDocument();
 		expect(screen.getByLabelText("Data do evento")).toBeInTheDocument();
-		expect(screen.getByLabelText("Senha do evento")).toBeInTheDocument();
+		expect(screen.queryByLabelText("Senha do evento")).not.toBeInTheDocument();
 
 		// Swatches: radiogroup com um radio por cor da paleta.
 		const swatches = screen.getByRole("radiogroup", {
@@ -131,7 +129,7 @@ describe("CreateEventForm", () => {
 		const body = JSON.parse(init?.body as string);
 		expect(body.name).toBe(VALID.name);
 		expect(body.eventDate).toContain("2026-12-31");
-		expect(body.password).toBe(VALID.password);
+		expect(body).not.toHaveProperty("password");
 		expect(body.colorAccent).toBe(DEFAULT_ACCENT_HEX);
 		expect(body.presetMissionIds).toEqual(["selfie-anfitriao"]);
 		expect(body.customMissions).toEqual(["Foto com o mascote"]);

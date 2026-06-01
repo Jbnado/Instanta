@@ -58,7 +58,7 @@ describe("EditEventForm", () => {
 		expect(screen.getByText("Foto com o mascote")).toBeInTheDocument();
 	});
 
-	it("envia PATCH com o nome alterado e omite a senha em branco", async () => {
+	it("envia PATCH com o nome alterado (sem campo de senha)", async () => {
 		const user = userEvent.setup();
 		const fetchMock = vi.mocked(fetch).mockResolvedValue(okResponse());
 
@@ -80,25 +80,9 @@ describe("EditEventForm", () => {
 
 		const body = JSON.parse(init?.body as string);
 		expect(body.name).toBe("Aniversário da Bia");
-		// Senha em branco NÃO vai no payload (rotação opt-in).
+		// Senha de evento foi abolida — não existe campo nem vai no payload.
 		expect(body).not.toHaveProperty("password");
-	});
-
-	it("inclui a senha no payload quando preenchida", async () => {
-		const user = userEvent.setup();
-		const fetchMock = vi.mocked(fetch).mockResolvedValue(okResponse());
-
-		render(<EditEventForm event={EVENT} />);
-
-		await user.type(screen.getByLabelText("Senha do evento"), "novasenha");
-
-		const submit = screen.getByRole("button", { name: /salvar alterações/i });
-		await waitFor(() => expect(submit).toBeEnabled());
-		await user.click(submit);
-
-		await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-		const body = JSON.parse(fetchMock.mock.calls[0]![1]?.body as string);
-		expect(body.password).toBe("novasenha");
+		expect(screen.queryByLabelText("Senha do evento")).not.toBeInTheDocument();
 	});
 
 	it("chama onSaved e mostra confirmação no 200", async () => {

@@ -224,8 +224,6 @@ export function SignupForm({ onSuccess }: Props) {
 						}
 					/>
 					<Label htmlFor="signup-terms" className="leading-snug font-normal">
-						{/* TODO: linkar os Termos e a Política de Privacidade reais
-						    (planning-artifacts/legal/*) quando as páginas existirem. */}
 						<span>
 							Li e aceito os{" "}
 							<a

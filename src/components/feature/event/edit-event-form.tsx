@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zResolver } from "@/lib/zod-resolver";
-import { Eye, EyeOff, Check } from "lucide-react";
+import { Check } from "lucide-react";
 
 import {
 	updateEventSchema,
@@ -64,7 +64,6 @@ function splitMissions(missions: EventDetail["missions"]): {
 }
 
 export function EditEventForm({ event, onSaved }: Props) {
-	const [showPassword, setShowPassword] = useState(false);
 	const [status, setStatus] = useState<FormStatus>({ kind: "idle" });
 
 	const initialMissions = splitMissions(event.missions);
@@ -86,10 +85,6 @@ export function EditEventForm({ event, onSaved }: Props) {
 			// edita a string e o zod coage pra Date no submit (mesma fricção do create form).
 			eventDate: isoToDateInput(event.eventDate) as unknown as Date,
 			description: event.description ?? "",
-			// Senha começa indefinida (campo vazio = mantém a atual). O register usa
-			// `setValueAs` pra converter "" → undefined, senão o min(4) do schema
-			// rejeitaria a string vazia mesmo o campo sendo opcional.
-			password: undefined,
 			colorAccent: event.colorAccent,
 			presetMissionIds: initialMissions.presetMissionIds,
 			customMissions: initialMissions.customMissions,
@@ -137,9 +132,8 @@ export function EditEventForm({ event, onSaved }: Props) {
 	const onSubmit = handleSubmit(async (data) => {
 		setStatus({ kind: "idle" });
 
-		// Monta o payload só com o que mudou/foi preenchido. Senha em branco é
-		// omitida (deixar em branco = mantém a senha atual). Missões/cor sempre
-		// refletem o estado atual do form (substituição completa no backend).
+		// Monta o payload com o estado atual do form. Missões/cor sempre refletem
+		// o estado atual (substituição completa no backend).
 		const payload: Partial<UpdateEventInput> = {
 			name: data.name,
 			eventDate: data.eventDate,
@@ -148,10 +142,6 @@ export function EditEventForm({ event, onSaved }: Props) {
 			presetMissionIds: data.presetMissionIds,
 			customMissions: data.customMissions,
 		};
-		// Só inclui a senha se o anfitrião digitou algo (rotação opt-in).
-		if (typeof data.password === "string" && data.password.length > 0) {
-			payload.password = data.password;
-		}
 
 		let res: Response;
 		try {
@@ -271,48 +261,6 @@ export function EditEventForm({ event, onSaved }: Props) {
 					>
 						{errors.description.message}
 					</p>
-				) : null}
-			</div>
-
-			{/* Senha do evento — rotação OPCIONAL (branco = mantém a atual) */}
-			<div className="space-y-1.5">
-				<Label htmlFor="edit-event-password">Senha do evento</Label>
-				<div className="relative">
-					<Input
-						id="edit-event-password"
-						type={showPassword ? "text" : "password"}
-						autoComplete="off"
-						className="pr-11"
-						placeholder="Nova senha (opcional)"
-						aria-invalid={errors.password ? true : undefined}
-						aria-describedby="edit-event-password-help"
-						{...register("password", {
-							// "" → undefined: deixar em branco mantém a senha atual e
-							// some do payload (em vez de bater no min(4) do schema).
-							setValueAs: (v) =>
-								typeof v === "string" && v.length === 0 ? undefined : v,
-						})}
-					/>
-					<button
-						type="button"
-						onClick={() => setShowPassword((s) => !s)}
-						aria-label={showPassword ? "Esconder senha" : "Mostrar senha"}
-						aria-pressed={showPassword}
-						className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-muted-foreground hover:text-foreground"
-					>
-						{showPassword ? (
-							<EyeOff className="size-4" />
-						) : (
-							<Eye className="size-4" />
-						)}
-					</button>
-				</div>
-				<p id="edit-event-password-help" className="text-sm text-muted-foreground">
-					Deixe em branco pra manter a senha atual. Trocar a senha desconecta os
-					convidados que entraram com a antiga.
-				</p>
-				{errors.password ? (
-					<p className="text-sm text-destructive">{errors.password.message}</p>
 				) : null}
 			</div>
 

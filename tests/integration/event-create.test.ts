@@ -72,7 +72,6 @@ const validBody = {
 	name: "Festa da Ana",
 	eventDate: "2026-07-15T20:00:00.000Z",
 	description: "Aniversário",
-	password: "festa2026",
 	colorAccent: "#A855F7",
 	presetMissionIds: ["selfie-anfitriao"],
 	customMissions: ["Foto com o bolo"],
@@ -109,7 +108,6 @@ describe("POST /api/events", () => {
 		expect(row!.status).toBe("Inativo");
 		expect(row!.cap).toBe(10_737_418_240);
 		expect(row!.bytesUsed).toBe(0);
-		expect(row!.passwordHash).toMatch(/^\$argon2id\$/);
 
 		const missions = await db
 			.select()

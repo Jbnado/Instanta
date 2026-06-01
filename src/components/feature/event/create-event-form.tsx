@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zResolver } from "@/lib/zod-resolver";
-import { Eye, EyeOff, Check, Plus, X } from "lucide-react";
+import { Check, Plus, X } from "lucide-react";
 
 import {
 	createEventSchema,
@@ -50,7 +50,6 @@ interface CreatedEventResponse {
 }
 
 export function CreateEventForm({ onSuccess }: Props) {
-	const [showPassword, setShowPassword] = useState(false);
 	const [status, setStatus] = useState<FormStatus>({ kind: "idle" });
 	// Buffer do input de missão personalizada (fora do RHF — só vira item ao adicionar).
 	const [customDraft, setCustomDraft] = useState("");
@@ -67,7 +66,6 @@ export function CreateEventForm({ onSuccess }: Props) {
 		defaultValues: {
 			name: "",
 			description: "",
-			password: "",
 			colorAccent: DEFAULT_ACCENT_HEX,
 			presetMissionIds: [],
 			customMissions: [],
@@ -264,43 +262,6 @@ export function CreateEventForm({ onSuccess }: Props) {
 				{errors.description ? (
 					<p id="event-description-error" className="text-sm text-destructive">
 						{errors.description.message}
-					</p>
-				) : null}
-			</div>
-
-			{/* Senha do evento */}
-			<div className="space-y-1.5">
-				<Label htmlFor="event-password">Senha do evento</Label>
-				<div className="relative">
-					<Input
-						id="event-password"
-						type={showPassword ? "text" : "password"}
-						autoComplete="off"
-						className="pr-11"
-						placeholder="Código que os convidados vão digitar"
-						aria-invalid={errors.password ? true : undefined}
-						aria-describedby={
-							errors.password ? "event-password-error" : undefined
-						}
-						{...register("password")}
-					/>
-					<button
-						type="button"
-						onClick={() => setShowPassword((s) => !s)}
-						aria-label={showPassword ? "Esconder senha" : "Mostrar senha"}
-						aria-pressed={showPassword}
-						className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-muted-foreground hover:text-foreground"
-					>
-						{showPassword ? (
-							<EyeOff className="size-4" />
-						) : (
-							<Eye className="size-4" />
-						)}
-					</button>
-				</div>
-				{errors.password ? (
-					<p id="event-password-error" className="text-sm text-destructive">
-						{errors.password.message}
 					</p>
 				) : null}
 			</div>

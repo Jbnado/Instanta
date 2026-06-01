@@ -50,6 +50,13 @@
       "when": 1780321583484,
       "tag": "0006_blue_expediter",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1780337624531,
+      "tag": "0007_real_radioactive_man",
+      "breakpoints": true
     }
   ]
 }
