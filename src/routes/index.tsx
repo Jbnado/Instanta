@@ -31,6 +31,12 @@ function HomePage() {
 					<Link to="/auth/login">Entrar</Link>
 				</Button>
 
+				{/* Atalho pro setup de evento (Story 3.1). A rota é auth-gated:
+				    quem não estiver logado cai no /auth/login pelo beforeLoad. */}
+				<Button asChild variant="ghost" size="lg">
+					<Link to="/event/create">Criar evento</Link>
+				</Button>
+
 				{/* Logout sempre disponível: o endpoint 401 graciosamente se não houver
 				    sessão. Affordance mínima até a Epic 3/5 trazer o header real. */}
 				<LogoutButton />

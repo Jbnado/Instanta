@@ -129,6 +129,11 @@ export const events = sqliteTable(
 		name: text("name").notNull(),
 		passwordHash: text("password_hash").notNull(),
 		colorAccent: text("color_accent").notNull(),
+		// Descrição opcional do evento (texto livre, mostrada ao convidado) — Story 3.1.
+		description: text("description"),
+		// Data do evento informada pelo anfitrião no setup (Story 3.1). Distinta de
+		// createdAt (quando o registro foi criado). Pode ser futura ou passada.
+		eventDate: integer("event_date", { mode: "timestamp" }).notNull(),
 		status: text("status", {
 			enum: ["Inativo", "Ativo", "Encerrado"],
 		}).notNull(),
@@ -136,6 +141,9 @@ export const events = sqliteTable(
 			.notNull()
 			.references(() => users.id),
 		bytesUsed: integer("bytes_used").notNull().default(0),
+		// Teto de armazenamento do evento em bytes (Story 3.1). Default 10GB; passar
+		// do cap cobra overage (R$/GB), não bloqueia upload (ver project_cap_overage).
+		cap: integer("cap").notNull().default(10_737_418_240),
 		// v2 telão: timestamp em que o evento entra em modo público; pré-modelado pra evitar migration futura.
 		scheduledVisibility: integer("scheduled_visibility", { mode: "timestamp" }),
 		endedAt: integer("ended_at", { mode: "timestamp" }),

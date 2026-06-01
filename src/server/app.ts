@@ -8,6 +8,7 @@ import {
 	secureHeadersMiddleware,
 } from "./middleware";
 import { authRoutes } from "./routes/auth";
+import { eventRoutes } from "./routes/events";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -27,6 +28,10 @@ app.get("/api/health", (c) => c.json({ status: "ok" }));
 // Auth (Story 2.1): signup + rota protegida de diagnóstico. Montado antes das
 // rotas de debug. Middleware `auth.ts` NÃO é global — só onde a rota pede.
 app.route("/api/auth", authRoutes);
+
+// Events (Story 3.1): criar evento. authMiddleware + rate limit por usuário aplicados
+// dentro do módulo de rota (não global).
+app.route("/api/events", eventRoutes);
 
 // Rotas de debug pro Rate Limiter — prefixo `_` indica diagnóstico interno.
 // Mantidas em prod pra debugar sem rebuild (remover via story se virar surface ruim).
