@@ -20,3 +20,9 @@ SENTRY_DSN=
 # Em dev local: gere com `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`.
 # Em prod: `wrangler secret put AUTH_JWT_SECRET`. NUNCA commitar valor real aqui.
 AUTH_JWT_SECRET=dev-only-rotate-me-with-real-secret-generated-locally
+
+# Chave AES-GCM (32 bytes em base64) que cifra o secret TOTP do MFA admin (Story 2.7/2.8).
+# SEPARADA do AUTH_JWT_SECRET (NFR45).
+# Gere com: `openssl rand -base64 32`.
+# Em prod: `wrangler secret put MFA_ENCRYPTION_KEY`. NUNCA commitar valor real aqui.
+MFA_ENCRYPTION_KEY=dev-only-mfa-key-base64-32-bytes-replace-me=

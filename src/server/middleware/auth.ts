@@ -22,7 +22,9 @@ import {
 } from "../lib/auth-cookies";
 
 // `c.get('user')` fica tipado nas rotas protegidas via este Variables.
-type AuthVariables = { user: AuthUser };
+// `sessionId` (sid do JWT, ou id da sessão recém-rotacionada) é exposto pras rotas
+// de MFA (Story 2.7/2.8), que precisam marcar/consultar a sessão como MFA-satisfeita.
+type AuthVariables = { user: AuthUser; sessionId: string };
 
 function unauthorized(c: Parameters<MiddlewareHandler>[0]) {
 	return c.json(
@@ -58,6 +60,7 @@ export function authMiddleware(): MiddlewareHandler<{
 				const user = await auth.getUserById(payload.sub);
 				if (user) {
 					c.set("user", user);
+					c.set("sessionId", payload.sid);
 					return next();
 				}
 				// Token válido mas user sumiu (deletado) → trata como não autenticado.
@@ -80,6 +83,7 @@ export function authMiddleware(): MiddlewareHandler<{
 				refreshToken: rotated.refreshToken,
 			});
 			c.set("user", rotated.user);
+			c.set("sessionId", rotated.sessionId);
 			return next();
 		} catch {
 			// Todos os modos de falha da rotação resultam em 401 + limpeza de cookies do

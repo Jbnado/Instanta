@@ -60,6 +60,10 @@ export const sessions = sqliteTable(
 		// quando esta sessão é rotacionada. Permite distinguir race benigno
 		// (sessão tem replacedBy + revogada há poucos segundos) de reuse real.
 		replacedBy: text("replaced_by"),
+		// MFA (Story 2.8): marca o instante em que esta sessão satisfez o 2º fator.
+		// null = MFA ainda pendente nesta sessão (admin acabou de logar com senha).
+		// É por-sessão de propósito: cada novo login/dispositivo refaz a verificação.
+		mfaVerifiedAt: integer("mfa_verified_at", { mode: "timestamp" }),
 		createdAt: integer("created_at", { mode: "timestamp" })
 			.notNull()
 			.default(sql`(unixepoch())`),
@@ -90,11 +94,24 @@ export const passwordResetTokens = sqliteTable(
 	(t) => [index("idx_password_reset_tokens_token_hash").on(t.tokenHash)],
 );
 
+// MFA TOTP do admin (Stories 2.7 setup / 2.8 verify).
+// - secretEncrypted: secret base32 do TOTP cifrado via AES-GCM (chave separada
+//   MFA_ENCRYPTION_KEY, NFR45). Plaintext NUNCA persiste nem é logado (NFR25).
+// - confirmedAt null = setup iniciado mas não confirmado (secret pendente, pode ser
+//   sobrescrito ao reiniciar o setup). Preenchido quando o 1º código válido confirma.
+// - recoveryCodesHash: JSON array de SHA-256 hex dos recovery codes (plaintext só
+//   exibido uma vez no confirm). Consumir um código = removê-lo do array (NFR48).
+// - lastVerifiedCode/lastVerifiedAt: guarda do último código aceito pra replay
+//   protection (Story 2.8): mesmo código dentro de 30s → rejeitado.
 export const userMfaSecrets = sqliteTable("user_mfa_secrets", {
 	userId: text("user_id")
 		.primaryKey()
 		.references(() => users.id),
 	secretEncrypted: text("secret_encrypted").notNull(),
+	confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+	recoveryCodesHash: text("recovery_codes_hash"),
+	lastVerifiedCode: text("last_verified_code"),
+	lastVerifiedAt: integer("last_verified_at", { mode: "timestamp" }),
 	createdAt: integer("created_at", { mode: "timestamp" })
 		.notNull()
 		.default(sql`(unixepoch())`),

@@ -82,6 +82,17 @@ export const resetConfirmSchema = z.object({
 
 export type ResetConfirmInput = z.infer<typeof resetConfirmSchema>;
 
+// MFA TOTP (Stories 2.7 setup-confirm / 2.8 verify): código de 6 dígitos do app
+// authenticator. Mesmo schema serve pra confirmar o setup e pra verificar no login.
+export const mfaCodeSchema = z.object({
+	code: z
+		.string()
+		.trim()
+		.regex(/^\d{6}$/, { message: "Informe o código de 6 dígitos." }),
+});
+
+export type MfaCodeInput = z.infer<typeof mfaCodeSchema>;
+
 export const userPublicSchema = z.object({
 	id: z.string(),
 	email: z.string(),
@@ -105,6 +116,8 @@ export const AUTH_ERROR_CODES = {
 	DISPOSABLE_EMAIL: "DISPOSABLE_EMAIL",
 	INVALID_CREDENTIALS: "INVALID_CREDENTIALS",
 	INVALID_RESET_TOKEN: "INVALID_RESET_TOKEN",
+	MFA_INVALID_CODE: "MFA_INVALID_CODE",
+	MFA_REPLAY: "MFA_REPLAY",
 	RATE_LIMITED: "RATE_LIMITED",
 	VALIDATION: "VALIDATION",
 } as const;

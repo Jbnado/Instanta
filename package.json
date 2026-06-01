@@ -17,6 +17,8 @@
 		"drizzle-orm": "^0.45.2",
 		"hono": "4.11.1",
 		"lucide-react": "^1.14.0",
+		"otpauth": "^9.5.1",
+		"qrcode.react": "^4.2.0",
 		"radix-ui": "^1.4.3",
 		"react": "19.2.1",
 		"react-dom": "19.2.1",

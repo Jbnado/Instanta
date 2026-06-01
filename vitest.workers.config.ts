@@ -27,6 +27,12 @@ export default defineConfig({
 						// ALLOWED_ORIGINS contém prod (1ª — Story 1.6 lê split[0]) E localhost
 						// (rotas de auth postam de localhost:5173 no teste).
 						ALLOWED_ORIGINS: "https://instanta.jbnado.dev,http://localhost:5173",
+						// Chave de teste pra AES-GCM do secret TOTP (Story 2.7/2.8). 32 bytes base64.
+						MFA_ENCRYPTION_KEY: "dGVzdC1tZmEta2V5LTMyLWJ5dGVzLWFhYWFhYWFhYWE=",
+						// Email admin de teste (Story 2.7/2.8): deriveRole→admin pra esse email.
+						// Explícito aqui (não herda das vars de wrangler.jsonc) pro teste de
+						// MFA admin-only ser determinístico.
+						ADMIN_EMAIL: "admin@instanta.test",
 					},
 					compatibilityFlags: ["nodejs_compat"],
 				},

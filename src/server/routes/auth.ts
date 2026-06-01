@@ -9,10 +9,11 @@
  * usada pelos testes de rotação de refresh (AC-7). Devolve `c.get('user')`.
  */
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 
 import {
 	loginInputSchema,
+	mfaCodeSchema,
 	resetConfirmSchema,
 	resetRequestSchema,
 	signupInputSchema,
@@ -30,8 +31,14 @@ import {
 	InvalidCredentialsError,
 	InvalidResetTokenError,
 } from "../services/auth-service";
+import {
+	createMfaService,
+	InvalidMfaCodeError,
+	MfaNotConfiguredError,
+	MfaReplayError,
+} from "../services/mfa-service";
 
-type AuthVariables = { user: AuthUser };
+type AuthVariables = { user: AuthUser; sessionId: string };
 
 // Jitter 50–250ms em TODAS as branches do signup pra mascarar o delta de timing
 // entre hash+insert (~150ms) e lookup+return (~5ms) — anti-enumeração (FR65/UX-DR).
@@ -274,3 +281,114 @@ authRoutes.post("/logout", authMiddleware(), async (c) => {
 authRoutes.get("/_auth-test", authMiddleware(), (c) => {
 	return c.json({ user: c.get("user") });
 });
+
+// ============================================================================
+// GET /me — Story 2.7. Usuário autenticado corrente (front hidrata sessão).
+// ============================================================================
+authRoutes.get("/me", authMiddleware(), (c) => {
+	return c.json({ user: c.get("user") });
+});
+
+// ============================================================================
+// MFA TOTP (Stories 2.7 setup / 2.8 verify + replay protection).
+// ============================================================================
+// Guard admin-only: setup/confirm/verify só pra role admin → 403 caso contrário.
+// status e /me não exigem admin (qualquer autenticado consulta o próprio estado).
+function requireAdmin(
+	c: Context<{ Bindings: Env; Variables: AuthVariables }>,
+): Response | null {
+	if (c.get("user").role !== "admin") {
+		return c.json(
+			{
+				type: "https://instanta.jbnado.dev/errors/forbidden",
+				title: "Acesso negado",
+				status: 403,
+				detail: "Apenas administradores configuram MFA.",
+				instance: c.req.path,
+			},
+			403,
+		);
+	}
+	return null;
+}
+
+// GET /mfa/status — { configured, verified } pra sessão atual (qualquer autenticado).
+authRoutes.get("/mfa/status", authMiddleware(), async (c) => {
+	const mfa = createMfaService({
+		db: getDB(c.env),
+		encryptionKey: c.env.MFA_ENCRYPTION_KEY,
+	});
+	const status = await mfa.getStatus(c.get("user").id, c.get("sessionId"));
+	return c.json(status, 200);
+});
+
+// POST /mfa/setup — admin: gera secret TOTP + URI otpauth pro QR. Pendente até confirmar.
+authRoutes.post("/mfa/setup", authMiddleware(), async (c) => {
+	const denied = requireAdmin(c);
+	if (denied) return denied;
+
+	const user = c.get("user");
+	const mfa = createMfaService({
+		db: getDB(c.env),
+		encryptionKey: c.env.MFA_ENCRYPTION_KEY,
+	});
+	// Label da conta no app authenticator = email do admin.
+	const result = await mfa.beginSetup(user.id, user.email);
+	return c.json({ otpauthUri: result.otpauthUri, secret: result.secret }, 200);
+});
+
+// POST /mfa/confirm — admin: confirma o setup com o 1º código → recovery codes (uma vez).
+authRoutes.post(
+	"/mfa/confirm",
+	authMiddleware(),
+	zValidator("json", mfaCodeSchema),
+	async (c) => {
+		const denied = requireAdmin(c);
+		if (denied) return denied;
+
+		const mfa = createMfaService({
+			db: getDB(c.env),
+			encryptionKey: c.env.MFA_ENCRYPTION_KEY,
+		});
+		try {
+			const { recoveryCodes } = await mfa.confirmSetup(
+				c.get("user").id,
+				c.req.valid("json").code,
+			);
+			return c.json({ recoveryCodes }, 200);
+		} catch (err) {
+			if (err instanceof InvalidMfaCodeError || err instanceof MfaNotConfiguredError) {
+				return c.json({ error: "MFA_INVALID_CODE" }, 400);
+			}
+			throw err;
+		}
+	},
+);
+
+// POST /mfa/verify — admin: valida o 2º fator no login. Replay → MFA_REPLAY.
+authRoutes.post(
+	"/mfa/verify",
+	authMiddleware(),
+	zValidator("json", mfaCodeSchema),
+	async (c) => {
+		const denied = requireAdmin(c);
+		if (denied) return denied;
+
+		const mfa = createMfaService({
+			db: getDB(c.env),
+			encryptionKey: c.env.MFA_ENCRYPTION_KEY,
+		});
+		try {
+			await mfa.verify(c.get("user").id, c.req.valid("json").code, c.get("sessionId"));
+			return c.json({ ok: true }, 200);
+		} catch (err) {
+			if (err instanceof MfaReplayError) {
+				return c.json({ error: "MFA_REPLAY" }, 400);
+			}
+			if (err instanceof InvalidMfaCodeError || err instanceof MfaNotConfiguredError) {
+				return c.json({ error: "MFA_INVALID_CODE" }, 400);
+			}
+			throw err;
+		}
+	},
+);
