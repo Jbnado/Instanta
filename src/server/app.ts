@@ -10,6 +10,7 @@ import {
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
 import { eventRoutes } from "./routes/events";
+import { photoRoutes } from "./routes/photos";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -33,6 +34,11 @@ app.route("/api/auth", authRoutes);
 // Events (Story 3.1): criar evento. authMiddleware + rate limit por usuário aplicados
 // dentro do módulo de rota (não global).
 app.route("/api/events", eventRoutes);
+
+// Photos (Epic 6, Stories 6.5-6.7): upload-url + confirm. Montado no MESMO prefixo
+// `/api/events` → paths /api/events/:slug/upload-url e /api/events/:slug/photos.
+// authMiddleware + rate limit aplicados dentro do módulo de rota (não global).
+app.route("/api/events", photoRoutes);
 
 // Admin (Story 3.4): fila de ativação + ativar evento. authMiddleware + guard admin
 // aplicados dentro do módulo de rota (não global).

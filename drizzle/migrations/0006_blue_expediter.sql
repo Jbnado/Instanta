@@ -1,0 +1,1 @@
+ALTER TABLE `event_photos` ADD `size_bytes` integer DEFAULT 0 NOT NULL;

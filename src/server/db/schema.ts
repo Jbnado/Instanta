@@ -214,6 +214,10 @@ export const eventPhotos = sqliteTable(
 			.notNull()
 			.references(() => users.id),
 		cfImageId: text("cf_image_id").notNull(),
+		// Tamanho real da foto em bytes (Story 6.6/6.7) — base do contador de cap
+		// (events.bytes_used += size no confirm) e do decremento no delete (Story 6.11).
+		// Default 0 pra compatibilizar rows pré-existentes; o confirm sempre grava o real.
+		sizeBytes: integer("size_bytes").notNull().default(0),
 		telaoVisible: integer("telao_visible", { mode: "boolean" })
 			.notNull()
 			.default(true),
