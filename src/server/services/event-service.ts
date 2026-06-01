@@ -11,13 +11,18 @@
  * - Clock injetável (`now`) pra testes determinísticos.
  * - Inserts numa transação (atomicidade evento + missões).
  */
-import { and, eq, ne } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 
 import type { DB } from "../db/client";
 import { eventMissions, events } from "../db/schema";
 import { hashPassword } from "../lib/password";
 import { presetLabelById } from "../../lib/shared/mission-presets";
-import type { CreateEventInput } from "../../lib/shared/schemas/event";
+import type {
+	CreateEventInput,
+	EventDetail,
+	UpdateEventInput,
+} from "../../lib/shared/schemas/event";
 
 // ============================================================================
 // Constantes
@@ -53,6 +58,17 @@ export interface CreateEventResult {
 	colorAccent: string;
 }
 
+/** Item da lista de eventos do anfitrião (Story 3.3) — campos do feed de eventos. */
+export interface EventListItem {
+	id: string;
+	slug: string;
+	name: string;
+	status: "Inativo" | "Ativo" | "Encerrado";
+	colorAccent: string;
+	eventDate: string; // ISO
+	description: string | null;
+}
+
 export interface EventServiceDeps {
 	db: DB;
 	/** Clock injetável para testes determinísticos. */
@@ -61,6 +77,25 @@ export interface EventServiceDeps {
 
 export interface EventService {
 	createEvent(args: CreateEventArgs): Promise<CreateEventResult>;
+	/** Lista os eventos do anfitrião ordenados por data (Story 3.3). */
+	listEventsForHost(hostUserId: string): Promise<EventListItem[]>;
+	/**
+	 * Carrega um evento + suas missões pelo slug, SE pertencer ao anfitrião.
+	 * Retorna `null` quando o evento não existe OU não é do anfitrião — a rota
+	 * mapeia null → 404 sem revelar a existência/posse (R-019). Story 3.2.
+	 */
+	getEventForHost(slug: string, hostUserId: string): Promise<EventDetail | null>;
+	/**
+	 * Atualização parcial de evento (Story 3.2, FR13). Lança EventNotFoundError se o
+	 * slug não existe ou não é do anfitrião. Rotaciona o hash da senha quando `password`
+	 * presente; substitui o conjunto de missões quando `presetMissionIds`/`customMissions`
+	 * presentes. Retorna o EventDetail atualizado.
+	 */
+	updateEvent(
+		slug: string,
+		hostUserId: string,
+		input: UpdateEventInput,
+	): Promise<EventDetail>;
 }
 
 // ============================================================================
@@ -75,6 +110,17 @@ export class ActiveEventLimitError extends Error {
 	readonly code = "ACTIVE_LIMIT_REACHED";
 	constructor() {
 		super("Limite de 3 eventos ativos atingido");
+	}
+}
+
+/**
+ * Evento não existe OU não pertence ao anfitrião que pediu (Story 3.2). A rota
+ * traduz pra 404 { error: "NOT_FOUND" } — NÃO 403 — pra não revelar posse (R-019).
+ */
+export class EventNotFoundError extends Error {
+	readonly code = "NOT_FOUND";
+	constructor() {
+		super("Evento não encontrado");
 	}
 }
 
@@ -196,5 +242,183 @@ export function createEventService(deps: EventServiceDeps): EventService {
 		};
 	}
 
-	return { createEvent };
+	// ------------------------------------------------------------------------
+	// Story 3.3 — listar eventos do anfitrião.
+	// ------------------------------------------------------------------------
+	async function listEventsForHost(hostUserId: string): Promise<EventListItem[]> {
+		// Só os eventos cujo dono é o usuário autenticado, ordenados por data do evento.
+		// O agrupamento por status fica a cargo do frontend (Story 3.3).
+		const rows = await db
+			.select({
+				id: events.id,
+				slug: events.slug,
+				name: events.name,
+				status: events.status,
+				colorAccent: events.colorAccent,
+				eventDate: events.eventDate,
+				description: events.description,
+			})
+			.from(events)
+			.where(eq(events.hostUserId, hostUserId))
+			.orderBy(asc(events.eventDate));
+
+		return rows.map((r) => ({
+			id: r.id,
+			slug: r.slug,
+			name: r.name,
+			status: r.status,
+			colorAccent: r.colorAccent,
+			eventDate: r.eventDate.toISOString(),
+			description: r.description,
+		}));
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.2 — carregar evento + missões pro host editar.
+	// ------------------------------------------------------------------------
+
+	/** Carrega missões do evento no shape do eventDetailSchema. */
+	async function loadMissions(
+		eventId: string,
+	): Promise<EventDetail["missions"]> {
+		const rows = await db
+			.select({
+				id: eventMissions.id,
+				label: eventMissions.label,
+				isPreset: eventMissions.isPreset,
+			})
+			.from(eventMissions)
+			.where(eq(eventMissions.eventId, eventId));
+		return rows;
+	}
+
+	/**
+	 * Carrega o evento pelo slug exigindo posse (hostUserId). Retorna a row ou null.
+	 * Base compartilhada por getEventForHost e updateEvent — checa posse na query
+	 * (and slug + hostUserId) pra não vazar existência de eventos de terceiros.
+	 */
+	async function loadOwnedEvent(slug: string, hostUserId: string) {
+		const [row] = await db
+			.select()
+			.from(events)
+			.where(and(eq(events.slug, slug), eq(events.hostUserId, hostUserId)));
+		return row ?? null;
+	}
+
+	/** Monta o EventDetail a partir de uma row de evento + suas missões. */
+	function toEventDetail(
+		row: typeof events.$inferSelect,
+		missions: EventDetail["missions"],
+	): EventDetail {
+		return {
+			id: row.id,
+			slug: row.slug,
+			name: row.name,
+			status: row.status,
+			colorAccent: row.colorAccent,
+			eventDate: row.eventDate.toISOString(),
+			description: row.description,
+			missions,
+		};
+	}
+
+	async function getEventForHost(
+		slug: string,
+		hostUserId: string,
+	): Promise<EventDetail | null> {
+		const row = await loadOwnedEvent(slug, hostUserId);
+		if (!row) return null; // não existe OU não é dono → null (rota → 404, R-019).
+		const missions = await loadMissions(row.id);
+		return toEventDetail(row, missions);
+	}
+
+	// ------------------------------------------------------------------------
+	// Story 3.2 — editar evento (update parcial + rotação de senha + missões).
+	// ------------------------------------------------------------------------
+	async function updateEvent(
+		slug: string,
+		hostUserId: string,
+		input: UpdateEventInput,
+	): Promise<EventDetail> {
+		const row = await loadOwnedEvent(slug, hostUserId);
+		// 404, não 403: não revelamos se o evento existe pra outro dono (R-019).
+		if (!row) throw new EventNotFoundError();
+
+		const eventId = row.id;
+		const updatedAt = now();
+
+		// 1. Monta o patch parcial do evento. Só inclui campos enviados.
+		const eventPatch: Partial<typeof events.$inferInsert> = {};
+		if (input.name !== undefined) eventPatch.name = input.name;
+		if (input.eventDate !== undefined) eventPatch.eventDate = input.eventDate;
+		if (input.description !== undefined)
+			eventPatch.description = input.description ?? null;
+		if (input.colorAccent !== undefined) eventPatch.colorAccent = input.colorAccent;
+		if (input.password !== undefined) {
+			// Rotaciona o hash da senha do evento (argon2id compartilhado).
+			eventPatch.passwordHash = await hashPassword(input.password);
+			// TODO Epic 5: revogar as sessões de convidado baseadas na senha ANTIGA.
+			// As sessões escopadas a evento/convidado ainda não existem (chegam na Epic 5),
+			// então não há linhas a revogar hoje. Quando existirem, revogar aqui na MESMA
+			// transação do update (db.batch) usando o eventId + o instante da rotação.
+		}
+
+		// 2. Decide se o conjunto de missões será substituído (qualquer um dos dois
+		//    arrays presente dispara o replace completo — Story 3.2).
+		const replaceMissions =
+			input.presetMissionIds !== undefined || input.customMissions !== undefined;
+
+		// Statements da transação D1 (atomicidade update + replace de missões).
+		// drizzle tipa cada item do batch via generics distintos por statement; aqui
+		// misturamos update/delete/insert, então usamos o tipo amplo BatchItem<"sqlite">.
+		type Stmt = BatchItem<"sqlite">;
+		const statements: Stmt[] = [];
+
+		// Sempre atualiza pelo menos um campo: o updateEventSchema garante ≥1 chave, mas
+		// se vierem APENAS missões o patch fica vazio — nesse caso não emitimos update.
+		if (Object.keys(eventPatch).length > 0) {
+			statements.push(db.update(events).set(eventPatch).where(eq(events.id, eventId)));
+		}
+
+		if (replaceMissions) {
+			const presetIds = input.presetMissionIds ?? [];
+			const customMissions = input.customMissions ?? [];
+			const missionRows = [
+				...presetIds.map((id) => ({
+					id: crypto.randomUUID(),
+					eventId,
+					label: presetLabelById(id) ?? id,
+					isPreset: true,
+					createdAt: updatedAt,
+				})),
+				...customMissions.map((label) => ({
+					id: crypto.randomUUID(),
+					eventId,
+					label,
+					isPreset: false,
+					createdAt: updatedAt,
+				})),
+			];
+
+			// Apaga as missões atuais e re-insere o novo conjunto.
+			statements.push(db.delete(eventMissions).where(eq(eventMissions.eventId, eventId)));
+			if (missionRows.length > 0) {
+				statements.push(db.insert(eventMissions).values(missionRows));
+			}
+		}
+
+		// db.batch exige ≥1 statement; o refine do schema garante que sempre há algo.
+		if (statements.length > 0) {
+			// db.batch espera um tuple não-vazio [first, ...rest]; nosso array é dinâmico
+			// (montado condicionalmente), então afirmamos a forma de tuple aqui.
+			await db.batch(statements as [Stmt, ...Stmt[]]);
+		}
+
+		// 3. Recarrega estado final (evento + missões) pra devolver o EventDetail.
+		const [fresh] = await db.select().from(events).where(eq(events.id, eventId));
+		const missions = await loadMissions(eventId);
+		return toEventDetail(fresh!, missions);
+	}
+
+	return { createEvent, listEventsForHost, getEventForHost, updateEvent };
 }

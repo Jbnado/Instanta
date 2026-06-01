@@ -48,6 +48,42 @@ export const createEventSchema = z.object({
 
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 
+/**
+ * Edição de evento (Story 3.2, FR13). Update parcial — todos os campos opcionais.
+ * Quando `presetMissionIds`/`customMissions` vêm, o conjunto de missões é SUBSTITUÍDO.
+ * Quando `password` vem, o backend rotaciona o hash + revoga sessões de convidado
+ * baseadas na senha antiga (hook de revogação chega de fato na Epic 5).
+ */
+export const updateEventSchema = z
+	.object({
+		name: z.string().trim().min(1).max(80).optional(),
+		eventDate: z.coerce.date().optional(),
+		description: z.string().trim().max(500).optional(),
+		password: z.string().min(4).max(64).optional(),
+		colorAccent: z.enum(ACCENT_HEXES).optional(),
+		presetMissionIds: z.array(z.enum(MISSION_PRESET_IDS)).optional(),
+		customMissions: z.array(z.string().trim().min(1).max(80)).max(10).optional(),
+	})
+	.refine((v) => Object.keys(v).length > 0, {
+		message: "Nada pra atualizar.",
+	});
+
+export type UpdateEventInput = z.infer<typeof updateEventSchema>;
+
+/** Detalhe do evento pro host editar (inclui missões). */
+export const eventDetailSchema = z.object({
+	id: z.string(),
+	slug: z.string(),
+	name: z.string(),
+	status: z.enum(["Inativo", "Ativo", "Encerrado"]),
+	colorAccent: z.string(),
+	eventDate: z.string(), // ISO
+	description: z.string().nullable(),
+	missions: z.array(z.object({ id: z.string(), label: z.string(), isPreset: z.boolean() })),
+});
+
+export type EventDetail = z.infer<typeof eventDetailSchema>;
+
 export const eventPublicSchema = z.object({
 	id: z.string(),
 	slug: z.string(),

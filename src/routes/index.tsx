@@ -37,6 +37,12 @@ function HomePage() {
 					<Link to="/event/create">Criar evento</Link>
 				</Button>
 
+				{/* Atalho pra lista de eventos do anfitrião (Story 3.3). Também
+				    auth-gated: quem não estiver logado cai no /auth/login. */}
+				<Button asChild variant="ghost" size="lg">
+					<Link to="/account/events">Meus eventos</Link>
+				</Button>
+
 				{/* Logout sempre disponível: o endpoint 401 graciosamente se não houver
 				    sessão. Affordance mínima até a Epic 3/5 trazer o header real. */}
 				<LogoutButton />

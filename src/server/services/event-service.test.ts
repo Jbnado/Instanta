@@ -7,6 +7,7 @@ import { eventMissions, events } from "../db/schema";
 import { createAuthService } from "./auth-service";
 import {
 	ActiveEventLimitError,
+	EventNotFoundError,
 	createEventService,
 	type EventService,
 } from "./event-service";
@@ -186,6 +187,167 @@ describe("event-service", () => {
 				input: baseInput({ name: "Novo permitido" }),
 			});
 			expect(fourth.id).toBeTruthy();
+		});
+	});
+
+	// ========================================================================
+	// Story 3.3 — listEventsForHost
+	// ========================================================================
+	describe("listEventsForHost", () => {
+		it("retorna só os eventos do anfitrião, ordenados por data", async () => {
+			const hostId = await makeHost(db, "list-owner@example.com");
+			const otherId = await makeHost(db, "list-other@example.com");
+
+			// Cria fora de ordem pra validar o orderBy.
+			await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "Julho", eventDate: new Date("2026-07-15T20:00:00Z") }),
+			});
+			await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "Maio", eventDate: new Date("2026-05-01T20:00:00Z") }),
+			});
+			// Evento de OUTRO host — não deve aparecer.
+			await service.createEvent({
+				hostUserId: otherId,
+				input: baseInput({ name: "De outro" }),
+			});
+
+			const list = await service.listEventsForHost(hostId);
+			expect(list).toHaveLength(2);
+			expect(list.map((e) => e.name)).toEqual(["Maio", "Julho"]);
+			expect(list.every((e) => typeof e.eventDate === "string")).toBe(true);
+			expect(list.some((e) => e.name === "De outro")).toBe(false);
+		});
+
+		it("retorna lista vazia quando o anfitrião não tem eventos", async () => {
+			const hostId = await makeHost(db, "list-empty@example.com");
+			expect(await service.listEventsForHost(hostId)).toEqual([]);
+		});
+	});
+
+	// ========================================================================
+	// Story 3.2 — getEventForHost
+	// ========================================================================
+	describe("getEventForHost", () => {
+		it("retorna evento + missões pro dono", async () => {
+			const hostId = await makeHost(db, "get-owner@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({
+					presetMissionIds: ["brinde"],
+					customMissions: ["Foto custom"],
+				}),
+			});
+
+			const detail = await service.getEventForHost(created.slug, hostId);
+			expect(detail).not.toBeNull();
+			expect(detail!.id).toBe(created.id);
+			expect(detail!.slug).toBe(created.slug);
+			expect(typeof detail!.eventDate).toBe("string");
+			expect(detail!.missions).toHaveLength(2);
+			expect(detail!.missions.some((m) => m.isPreset && m.label === "Hora do brinde 🥂")).toBe(true);
+			expect(detail!.missions.some((m) => !m.isPreset && m.label === "Foto custom")).toBe(true);
+		});
+
+		it("retorna null pra evento de outro anfitrião (não vaza posse)", async () => {
+			const hostId = await makeHost(db, "get-owner2@example.com");
+			const otherId = await makeHost(db, "get-other2@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			expect(await service.getEventForHost(created.slug, otherId)).toBeNull();
+		});
+
+		it("retorna null pra slug inexistente", async () => {
+			const hostId = await makeHost(db, "get-missing@example.com");
+			expect(await service.getEventForHost("nao-existe-xyz", hostId)).toBeNull();
+		});
+	});
+
+	// ========================================================================
+	// Story 3.2 — updateEvent
+	// ========================================================================
+	describe("updateEvent", () => {
+		it("altera name/colorAccent/eventDate/description", async () => {
+			const hostId = await makeHost(db, "upd-fields@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+
+			const detail = await service.updateEvent(created.slug, hostId, {
+				name: "Festa Renomeada",
+				colorAccent: "#22C55E",
+				eventDate: new Date("2026-08-20T18:00:00Z"),
+				description: "Nova descrição",
+			});
+
+			expect(detail.name).toBe("Festa Renomeada");
+			expect(detail.colorAccent).toBe("#22C55E");
+			expect(detail.eventDate).toBe(new Date("2026-08-20T18:00:00Z").toISOString());
+			expect(detail.description).toBe("Nova descrição");
+
+			const [row] = await db.select().from(events).where(eq(events.id, created.id));
+			expect(row!.name).toBe("Festa Renomeada");
+			expect(row!.colorAccent).toBe("#22C55E");
+		});
+
+		it("com password rotaciona o passwordHash (novo $argon2id$, diferente do antigo)", async () => {
+			const hostId = await makeHost(db, "upd-pwd@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			const [before] = await db.select().from(events).where(eq(events.id, created.id));
+
+			await service.updateEvent(created.slug, hostId, { password: "novasenha456" });
+
+			const [after] = await db.select().from(events).where(eq(events.id, created.id));
+			expect(after!.passwordHash).toMatch(/^\$argon2id\$/);
+			expect(after!.passwordHash).not.toBe(before!.passwordHash);
+		});
+
+		it("substitui o conjunto de missões (antigas somem, novas com isPreset correto)", async () => {
+			const hostId = await makeHost(db, "upd-missions@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({
+					presetMissionIds: ["selfie-anfitriao"],
+					customMissions: ["Antiga"],
+				}),
+			});
+
+			await service.updateEvent(created.slug, hostId, {
+				presetMissionIds: ["brinde"],
+				customMissions: ["Nova custom"],
+			});
+
+			const rows = await db
+				.select()
+				.from(eventMissions)
+				.where(eq(eventMissions.eventId, created.id));
+			expect(rows).toHaveLength(2);
+			const labels = rows.map((r) => r.label).sort();
+			expect(labels).toEqual(["Hora do brinde 🥂", "Nova custom"].sort());
+			expect(rows.some((r) => r.isPreset && r.label === "Hora do brinde 🥂")).toBe(true);
+			expect(rows.some((r) => !r.isPreset && r.label === "Nova custom")).toBe(true);
+			// Antigas removidas.
+			expect(rows.some((r) => r.label === "Antiga")).toBe(false);
+			expect(rows.some((r) => r.label === "Selfie com o anfitrião")).toBe(false);
+		});
+
+		it("evento de outro anfitrião → EventNotFoundError", async () => {
+			const hostId = await makeHost(db, "upd-owner@example.com");
+			const otherId = await makeHost(db, "upd-other@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await expect(
+				service.updateEvent(created.slug, otherId, { name: "Hack" }),
+			).rejects.toBeInstanceOf(EventNotFoundError);
 		});
 	});
 });
