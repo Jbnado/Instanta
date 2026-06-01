@@ -2,6 +2,11 @@
 # Sem este arquivo, o pnpm subia pro diretório-pai (que tem um pnpm-workspace.yaml
 # herdado) e gravava o lock lá — deixando instanta/pnpm-lock.yaml órfão/stale, o
 # que quebrava `pnpm install --frozen-lockfile` no CI (que clona só instanta/).
+# `packages: ['.']` declara este dir como o único pacote do workspace — necessário
+# porque pnpm 10.11 (Cloudflare Workers Builds) erra "packages field missing or empty"
+# se o pnpm-workspace.yaml existir sem `packages`. Repo single-package, sem monorepo.
+packages:
+  - "."
 # `onlyBuiltDependencies` aprova o build script nativo do workerd.
 onlyBuiltDependencies:
   - workerd
