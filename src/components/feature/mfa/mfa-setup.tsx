@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
+import { zResolver } from "@/lib/zod-resolver";
 import { QRCodeSVG } from "qrcode.react";
 import { Check, Copy, Download } from "lucide-react";
 
@@ -48,10 +48,7 @@ export function MfaSetup({ onConfirmed }: Props) {
 		handleSubmit,
 		formState: { errors, isValid, isSubmitting },
 	} = useForm<MfaCodeInput>({
-		// @ts-expect-error — @hookform/resolvers@5.4.0 (latest) fixa o literal de versão
-		// interno do zod em 4.0 (_zod.version.minor: 0), incompatível com zod@4.4.3 nos
-		// tipos. Runtime OK (testes verdes). Remover quando o resolver atualizar.
-		resolver: zodResolver(mfaCodeSchema),
+		resolver: zResolver<MfaCodeInput>(mfaCodeSchema),
 		mode: "onTouched",
 		defaultValues: { code: "" },
 	});

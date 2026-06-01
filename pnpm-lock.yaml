@@ -72,7 +72,7 @@ importers:
         specifier: 19.2.1
         version: 19.2.1(react@19.2.1)
       react-hook-form:
-        specifier: ^7.76.0
+        specifier: 7.76.0
         version: 7.76.0(react@19.2.1)
       tailwind-merge:
         specifier: ^3.5.0
