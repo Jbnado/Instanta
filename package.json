@@ -36,6 +36,7 @@
 		"@fast-check/vitest": "^0.4.1",
 		"@playwright/test": "^1.60.0",
 		"@tailwindcss/vite": "^4.2.4",
+		"@tanstack/router-cli": "1.167.12",
 		"@tanstack/router-plugin": "^1.168.10",
 		"@testing-library/dom": "^10.4.1",
 		"@testing-library/jest-dom": "^6.9.1",
@@ -62,9 +63,10 @@
 	},
 	"private": true,
 	"scripts": {
-		"build": "tsc -b && vite build",
+		"build": "pnpm gen:routes && tsc -b && vite build",
 		"cf-typegen": "wrangler types",
-		"check": "tsc && vite build && wrangler deploy --dry-run",
+		"gen:routes": "tsr generate",
+		"check": "pnpm gen:routes && tsc && vite build && wrangler deploy --dry-run",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate:local": "wrangler d1 migrations apply instanta-dev --local",
 		"db:migrate:remote": "wrangler d1 migrations apply instanta-dev --remote",
@@ -82,7 +84,7 @@
 		"check:bundle-size": "node scripts/check-bundle-size.mjs",
 		"fr:check": "node scripts/fr-check.mjs",
 		"verify:domain": "node scripts/verify-domain.mjs",
-		"typecheck": "tsc -b --noEmit && tsc -p tsconfig.tests.json --noEmit"
+		"typecheck": "pnpm gen:routes && tsc -b --noEmit && tsc -p tsconfig.tests.json --noEmit"
 	},
 	"type": "module"
 }
