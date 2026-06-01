@@ -5,7 +5,24 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-	{ ignores: ["dist", ".wrangler", "node_modules", "coverage", "playwright-report", "test-results"] },
+	{
+		ignores: [
+			"dist",
+			".wrangler",
+			"node_modules",
+			"coverage",
+			"playwright-report",
+			"test-results",
+			// Worktrees de agentes do Claude Code (cópias do repo) — não lintar.
+			".claude",
+			// Gerado por `wrangler types` (cf-typegen) — não lintar. Traz eslint-disable
+			// pra regras que não registramos (no-explicit-any/unified-signatures/etc),
+			// o que vira erro "rule not found". Arquivo gerado, fora do nosso controle.
+			"worker-configuration.d.ts",
+			// Gerado pelo TanStack Router plugin.
+			"src/routeTree.gen.ts",
+		],
+	},
 	{
 		extends: [js.configs.recommended, ...tseslint.configs.recommended],
 		files: ["**/*.{ts,tsx}"],
