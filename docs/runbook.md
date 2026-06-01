@@ -107,7 +107,15 @@ PR-3 (Contract — shadow table):
 
 ## CI/CD: secrets e environments
 
-GitHub Actions roda 6 workflows em `.github/workflows/` (Story 1.4). Antes de o primeiro PR rodar, configure isto **uma vez**:
+> **Deploy migrou pro Cloudflare Workers Builds (2026-06-01).** O deploy de produção
+> agora é automático no push pra `main` via a integração Git do Cloudflare (sem token,
+> sem approval gate do GitHub). Os workflows `deploy.yml` e `preview.yml` foram
+> **removidos** (eram redundantes). Restam só os de CHECK no GitHub Actions
+> (`ci`, `integration`, `e2e`, `bundle-size-check`), que não precisam de secrets CF.
+> ⚠️ O Workers Builds **NÃO roda migrations de D1** — após push com migration nova,
+> rodar `wrangler d1 migrations apply instanta-dev --remote` manualmente.
+
+GitHub Actions roda os workflows de check em `.github/workflows/` (Story 1.4). Os secrets abaixo **só eram necessários** pros workflows de deploy removidos — mantidos aqui como referência histórica caso o deploy via Actions volte:
 
 ### Secrets necessários
 
