@@ -1,12 +1,15 @@
 import { env } from "cloudflare:test";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { getDB } from "../db/client";
 import { passwordResetTokens, sessions, users } from "../db/schema";
 import {
+	ConcurrentRotationError,
 	createAuthService,
+	InactivityTimeoutError,
 	InvalidResetTokenError,
+	SessionRevokedError,
 	type AuthService,
 } from "./auth-service";
 import type { Mailer, SendPasswordResetArgs } from "./mailer";
@@ -269,7 +272,7 @@ describe("auth-service", () => {
 			expect(oldSession!.revokedAt).not.toBeNull();
 		});
 
-		it("rejeita refresh token já usado (reuse detection)", async () => {
+		it("rejeita refresh token já usado: reuse IMEDIATO (dentro do leeway) → ConcurrentRotationError", async () => {
 			const initial = await auth.signup({
 				email: "reuse@example.com",
 				password: "senha123abc",
@@ -279,16 +282,140 @@ describe("auth-service", () => {
 
 			await auth.rotateRefresh(initial.refreshToken);
 
-			// tentar reusar o refresh já rotacionado.
+			// Reusar o refresh já rotacionado IMEDIATAMENTE cai na janela de leeway →
+			// classificado como race benigno (Story 2.6). Ainda é 401 na rota, mas NÃO
+			// mata a família. A distinção precisa race-vs-reuse está nos testes de hardening.
 			await expect(
 				auth.rotateRefresh(initial.refreshToken),
-			).rejects.toThrow(/session.*(revoked|invalid)/i);
+			).rejects.toBeInstanceOf(ConcurrentRotationError);
 		});
 
 		it("rejeita refresh token inexistente", async () => {
 			await expect(
 				auth.rotateRefresh("invalid-token-xxxxxxxxxxxxxxxxxxxxxxx"),
 			).rejects.toThrow(/session.*(not found|invalid)/i);
+		});
+	});
+
+	// ========================================================================
+	// R-002 hardening (Story 2.6): leeway model + inatividade (NFR62).
+	// Clock totalmente controlado via deps.now pro contraste race-vs-reuse.
+	// ========================================================================
+	describe("rotateRefresh hardening (Story 2.6)", () => {
+		const SECOND = 1000;
+
+		it("(a) race benigno: refresh válido cuja sessão foi revogada DENTRO da janela de leeway → ConcurrentRotationError, e a sessão vencedora sobrevive", async () => {
+			// Relógio fixo: a revogação e o reuse acontecem no MESMO instante (dentro do leeway).
+			const fixed = new Date("2026-06-01T12:00:00.000Z");
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, now: () => fixed });
+
+			const initial = await svc.signup({
+				email: "race-svc@example.com",
+				password: "senha123abc",
+				displayName: "Race",
+				termsAccepted: true,
+			});
+			const [userRow] = await db
+				.select()
+				.from(users)
+				.where(eq(users.email, "race-svc@example.com"));
+			const userId = userRow!.id;
+
+			// Simula o IRMÃO vencedor: revoga a sessão A (com replacedBy) AGORA e cria a
+			// sessão sucessora "vencedora" que precisa permanecer viva.
+			const winnerSessionId = crypto.randomUUID();
+			await db
+				.update(sessions)
+				.set({ revokedAt: fixed, lastUsedAt: fixed, replacedBy: winnerSessionId })
+				.where(eq(sessions.id, initial.sessionId));
+			await db.insert(sessions).values({
+				id: winnerSessionId,
+				userId,
+				refreshTokenHash: "winner-hash-".padEnd(64, "0"),
+				createdAt: fixed,
+			});
+
+			// O perdedor reapresenta o refresh A dentro do leeway → race benigno.
+			await expect(svc.rotateRefresh(initial.refreshToken)).rejects.toBeInstanceOf(
+				ConcurrentRotationError,
+			);
+
+			// A família NÃO foi morta: a sessão vencedora continua viva.
+			const live = await db
+				.select()
+				.from(sessions)
+				.where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+			expect(live).toHaveLength(1);
+			expect(live[0]!.id).toBe(winnerSessionId);
+		});
+
+		it("(b) reuse real: refresh cuja sessão foi revogada FORA da janela de leeway → SessionRevokedError + TODAS as sessões revogadas", async () => {
+			const revokedAt = new Date("2026-06-01T12:00:00.000Z");
+			// Reuse acontece 11s depois (> REUSE_LEEWAY_S = 10s).
+			const reuseAt = new Date(revokedAt.getTime() + 11 * SECOND);
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, now: () => reuseAt });
+
+			const initial = await svc.signup({
+				email: "reuse-svc@example.com",
+				password: "senha123abc",
+				displayName: "Reuse",
+				termsAccepted: true,
+			});
+			const [userRow] = await db
+				.select()
+				.from(users)
+				.where(eq(users.email, "reuse-svc@example.com"));
+			const userId = userRow!.id;
+
+			// Sessão A revogada no passado (11s atrás), com sucessora ainda viva.
+			const successorId = crypto.randomUUID();
+			await db
+				.update(sessions)
+				.set({ revokedAt, lastUsedAt: revokedAt, replacedBy: successorId })
+				.where(eq(sessions.id, initial.sessionId));
+			await db.insert(sessions).values({
+				id: successorId,
+				userId,
+				refreshTokenHash: "successor-hash-".padEnd(64, "0"),
+				createdAt: revokedAt,
+			});
+
+			// Reuse fora do leeway → roubo real.
+			await expect(svc.rotateRefresh(initial.refreshToken)).rejects.toBeInstanceOf(
+				SessionRevokedError,
+			);
+
+			// Família morta: nenhuma sessão viva.
+			const live = await db
+				.select()
+				.from(sessions)
+				.where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+			expect(live).toHaveLength(0);
+		});
+
+		it("(c) inatividade (NFR62): sessão cujo lastUsedAt tem 25h → InactivityTimeoutError", async () => {
+			const created = new Date("2026-06-01T00:00:00.000Z");
+			// Última atividade 25h atrás em relação ao reuse.
+			const reuseAt = new Date(created.getTime() + 25 * 60 * 60 * SECOND);
+			const svc = createAuthService({ db, jwtSecret: TEST_JWT_SECRET, now: () => reuseAt });
+
+			const initial = await svc.signup({
+				email: "idle-svc@example.com",
+				password: "senha123abc",
+				displayName: "Idle",
+				termsAccepted: true,
+			});
+
+			// Sessão viva, mas com última atividade 25h atrás (createdAt mantido recente
+			// pra não disparar a expiração de 30d; lastUsedAt é o sinal de inatividade).
+			await db
+				.update(sessions)
+				.set({ createdAt: reuseAt, lastUsedAt: created })
+				.where(eq(sessions.id, initial.sessionId));
+
+			await expect(svc.rotateRefresh(initial.refreshToken)).rejects.toBeInstanceOf(
+				InactivityTimeoutError,
+			);
 		});
 	});
 

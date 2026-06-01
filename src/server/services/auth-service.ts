@@ -147,6 +147,30 @@ export class SessionNotFoundError extends Error {
 }
 
 /**
+ * Race benigno de rotação (R-002, Story 2.6): 2 abas dispararam o MESMO refresh
+ * válido quase ao mesmo tempo. O perdedor encontra a sessão já revogada PELO IRMÃO
+ * concorrente (revogada há ≤ REUSE_LEEWAY_S, com `replacedBy` setado). É 401 mas
+ * NÃO é reuse/roubo — a rota NÃO mata a família (a sessão nova do vencedor sobrevive).
+ */
+export class ConcurrentRotationError extends Error {
+	readonly code = "CONCURRENT_ROTATION";
+	constructor() {
+		super("Concurrent rotation race; this request lost");
+	}
+}
+
+/**
+ * Inatividade (NFR62): a sessão é válida dentro da janela 30d, mas ficou sem uso
+ * por mais de INACTIVITY_TIMEOUT_S. Tratada como expirada — força novo login.
+ */
+export class InactivityTimeoutError extends Error {
+	readonly code = "INACTIVITY_TIMEOUT";
+	constructor() {
+		super("Session expired due to inactivity");
+	}
+}
+
+/**
  * Reset token inválido: inexistente, expirado OU já usado. GENÉRICO de propósito
  * (não distingue qual caso) — a rota traduz pra microcopy "link expirado ou inválido".
  */
@@ -164,6 +188,15 @@ export class InvalidResetTokenError extends Error {
 const ACCESS_TOKEN_TTL_S = 15 * 60; // 15min
 const REFRESH_TOKEN_TTL_S = 30 * 24 * 60 * 60; // 30 dias
 const RESET_TOKEN_TTL_S = 30 * 60; // 30min (NFR43, lifetime ≤30min)
+// Janela de leeway pra reuse detection (R-002, Story 2.6). Modelo padrão da indústria
+// (IETF OAuth Security BCP / Auth0 reuse detection): se um refresh já revogado é
+// reapresentado DENTRO desta janela, tratamos como race concorrente benigno (2 abas);
+// FORA dela, como reuse/roubo real → mata a família. 10s cobre o jitter de rede de
+// requests paralelos sem abrir brecha relevante pra um atacante.
+const REUSE_LEEWAY_S = 10;
+// Inatividade (NFR62): sessão sem uso por mais que isso é tratada como expirada,
+// mesmo dentro da janela de 30d do refresh.
+const INACTIVITY_TIMEOUT_S = 24 * 60 * 60; // 24h
 // Domínio público default pro link de reset quando appBaseUrl não vem nas deps.
 const DEFAULT_APP_BASE_URL = "https://instanta.jbnado.dev";
 // NFR10: argon2id memory ≥64MB, time ≥3, parallelism ≥4.
@@ -331,10 +364,12 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 
 	async function createSession(
 		userId: string,
+		// id pré-computado (Story 2.6): a rotação precisa setar `replacedBy` na sessão
+		// antiga ANTES de criar a nova, então o id do sucessor é calculado antes.
+		sessionId: string = crypto.randomUUID(), // UUID v4 ok p/ session id
 	): Promise<{ sessionId: string; refreshToken: string }> {
 		const refreshToken = randomBase64UrlBytes(32); // ≥128 bits ✓
 		const refreshTokenHash = await sha256Hex(refreshToken);
-		const sessionId = crypto.randomUUID(); // UUID v4 ok p/ session id
 		await db.insert(sessions).values({
 			id: sessionId,
 			userId,
@@ -417,11 +452,32 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 	async function rotateRefresh(refreshTokenPlain: string): Promise<RotateRefreshResult> {
 		const refreshTokenHash = await sha256Hex(refreshTokenPlain);
 
+		// Id do sucessor pré-computado: gravamos `replacedBy` na sessão antiga no MESMO
+		// UPDATE atômico que a revoga, deixando a lineage de rotação rastreável (R-002).
+		const newSessionId = crypto.randomUUID();
+
+		// Lê a atividade PRÉVIA antes do UPDATE — o `.returning()` do Drizzle devolve os
+		// valores PÓS-update (lastUsedAt já seria now()), inúteis pro check de inatividade.
+		// Esta leitura é só pro timeout de inatividade (não-concorrente); a decisão de
+		// vencedor do race continua atômica no UPDATE abaixo.
+		const priorRows = await db
+			.select({ lastUsedAt: sessions.lastUsedAt, createdAt: sessions.createdAt })
+			.from(sessions)
+			.where(
+				and(
+					eq(sessions.refreshTokenHash, refreshTokenHash),
+					isNull(sessions.revokedAt),
+				),
+			);
+		const priorActivity = priorRows[0]
+			? (priorRows[0].lastUsedAt ?? priorRows[0].createdAt)
+			: null;
+
 		// Race protection (R-002): UPDATE atomic com WHERE exigindo revoked_at IS NULL.
-		// SQLite serializa transações concorrentes; só 1 vencedor terá `meta.changes === 1`.
+		// SQLite serializa transações concorrentes; só 1 vencedor terá uma linha afetada.
 		const result = await db
 			.update(sessions)
-			.set({ revokedAt: now(), lastUsedAt: now() })
+			.set({ revokedAt: now(), lastUsedAt: now(), replacedBy: newSessionId })
 			.where(
 				and(
 					eq(sessions.refreshTokenHash, refreshTokenHash),
@@ -435,17 +491,28 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 			});
 
 		if (result.length === 0) {
-			// 2 cenários: (a) token nunca existiu → SessionNotFoundError;
-			// (b) já foi revogado (reuse ou race perdedora) → SessionRevokedError + revoke all.
-			const existsRevoked = await db
+			// 0 linhas afetadas: ou o token nunca existiu, ou já estava revogado.
+			const existing = await db
 				.select()
 				.from(sessions)
 				.where(eq(sessions.refreshTokenHash, refreshTokenHash));
-			if (existsRevoked.length === 0) {
+			const sess = existing[0];
+			if (!sess || sess.revokedAt === null) {
+				// Não existe (ou estado impossível) → token desconhecido.
 				throw new SessionNotFoundError();
 			}
-			// Reuse detection: revogar TODAS as sessões do usuário (kill all devices).
-			const sess = existsRevoked[0]!;
+
+			// Já revogado. Modelo de leeway (IETF OAuth Security BCP / Auth0): a idade
+			// desde a revogação distingue race benigno de reuse/roubo real.
+			const ageSinceRevokeS = (now().getTime() - sess.revokedAt.getTime()) / 1000;
+			if (ageSinceRevokeS <= REUSE_LEEWAY_S) {
+				// Race concorrente benigno (2 abas): o irmão vencedor revogou esta sessão
+				// há poucos segundos. 401, mas NÃO matamos a família — a sessão nova do
+				// vencedor precisa sobreviver.
+				throw new ConcurrentRotationError();
+			}
+			// Reuse/roubo real: token superado reapresentado bem depois → mata a família
+			// (kill all devices), revogando todas as sessões vivas do usuário.
 			await db
 				.update(sessions)
 				.set({ revokedAt: now() })
@@ -461,19 +528,34 @@ export function createAuthService(deps: AuthServiceDeps): AuthService {
 			throw new SessionRevokedError();
 		}
 
+		// Inatividade (NFR62): última atividade PRÉVIA (lastUsedAt da rotação anterior,
+		// ou createdAt no 1º uso) mais velha que INACTIVITY_TIMEOUT_S → expira ANTES de
+		// emitir novos tokens. `priorActivity` é o valor lido pré-UPDATE.
+		const lastActivity = priorActivity ?? oldSession.createdAt;
+		const idleSec = (now().getTime() - lastActivity.getTime()) / 1000;
+		if (idleSec > INACTIVITY_TIMEOUT_S) {
+			throw new InactivityTimeoutError();
+		}
+
 		const user = await getUserById(oldSession.userId);
 		if (!user) {
 			throw new SessionNotFoundError();
 		}
 
-		const { sessionId: newSessionId, refreshToken: newRefreshToken } = await createSession(
+		// TODO Story 4.9: privilege-change rotation (NFR62). Hoje `role` é derivado de
+		// ADMIN_EMAIL (sem coluna `users.role`), então não há mutação de privilégio a
+		// detectar aqui — a sessão sempre carrega o role corrente. Quando a coluna
+		// `role` chegar na migração da 4.9, comparar o role da sessão antiga com o
+		// atual e forçar rotação (já é o caminho natural, pois recriamos a sessão).
+		const { sessionId: createdSessionId, refreshToken: newRefreshToken } = await createSession(
 			oldSession.userId,
+			newSessionId,
 		);
-		const accessToken = await generateAccessToken(oldSession.userId, newSessionId, user.role);
+		const accessToken = await generateAccessToken(oldSession.userId, createdSessionId, user.role);
 
 		return {
 			user,
-			sessionId: newSessionId,
+			sessionId: createdSessionId,
 			accessToken,
 			refreshToken: newRefreshToken,
 		};

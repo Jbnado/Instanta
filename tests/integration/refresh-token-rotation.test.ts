@@ -90,15 +90,21 @@ describe("refresh token rotation", () => {
 		expect(newJar.instanta_refresh).toBeTruthy();
 		expect(newJar.instanta_refresh).not.toBe(jar.instanta_refresh);
 
-		vi.useRealTimers();
+		// Avança o relógio ALÉM da janela de leeway (REUSE_LEEWAY_S = 10s) para que o
+		// reuse do refresh ANTIGO seja classificado como roubo real (não race benigno).
+		// O service lê `now()` via `new Date()`, então os fake timers movem seu relógio.
+		vi.advanceTimersByTime(11_000);
 
-		// Reusar o refresh ANTIGO (jar original) → 401 + todas as sessões do user revogadas.
+		// Reusar o refresh ANTIGO (jar original) fora da janela → 401 + reuse detection
+		// mata TODAS as sessões do user (kill all devices).
 		const reuse = await app.request(
 			authTestRequest({ instanta_refresh: jar.instanta_refresh! }),
 			{},
 			env,
 		);
 		expect(reuse.status).toBe(401);
+
+		vi.useRealTimers();
 
 		const [userRow] = await db.select().from(users).where(eq(users.email, "rot7@example.com"));
 		const live = await db
@@ -127,14 +133,14 @@ describe("refresh token rotation", () => {
 		const statuses = [a.status, b.status].sort();
 		expect(statuses).toEqual([200, 401]);
 
-		// DB: original revogada. O nº de sessões vivas é não-determinístico sob race:
-		// o request perdedor dispara reuse-detection ("kill all"), que pode revogar
-		// a sessão recém-criada pelo vencedor dependendo do interleaving (0 vivas) ou
-		// não (1 viva). Ambos são estados seguros — a garantia forte é o `[200, 401]`
-		// acima (R-002). A original SEMPRE fica revogada.
+		// DB: a original fica revogada e EXATAMENTE 1 sessão viva sobrevive — a nova do
+		// vencedor. O perdedor encontra a original revogada DENTRO da janela de leeway
+		// (REUSE_LEEWAY_S), classifica como race benigno (ConcurrentRotationError) e NÃO
+		// mata a família. Isto é a dívida R-002 sendo fechada: antes era
+		// toBeLessThanOrEqual(1) (não-determinístico); agora é determinístico.
 		const [userRow] = await db.select().from(users).where(eq(users.email, "race8@example.com"));
 		const all = await db.select().from(sessions).where(eq(sessions.userId, userRow!.id));
 		const live = all.filter((s) => s.revokedAt === null);
-		expect(live.length).toBeLessThanOrEqual(1);
+		expect(live).toHaveLength(1);
 	});
 });

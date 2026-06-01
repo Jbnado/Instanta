@@ -56,6 +56,10 @@ export const sessions = sqliteTable(
 		userAgent: text("user_agent"),
 		lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
 		revokedAt: integer("revoked_at", { mode: "timestamp" }),
+		// Lineage de rotação (R-002, Story 2.6): id da sessão sucessora, preenchido
+		// quando esta sessão é rotacionada. Permite distinguir race benigno
+		// (sessão tem replacedBy + revogada há poucos segundos) de reuse real.
+		replacedBy: text("replaced_by"),
 		createdAt: integer("created_at", { mode: "timestamp" })
 			.notNull()
 			.default(sql`(unixepoch())`),

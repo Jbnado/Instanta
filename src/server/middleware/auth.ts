@@ -82,7 +82,12 @@ export function authMiddleware(): MiddlewareHandler<{
 			c.set("user", rotated.user);
 			return next();
 		} catch {
-			// Reuse detection já revogou todas as sessões no service; limpa cookies do cliente.
+			// Todos os modos de falha da rotação resultam em 401 + limpeza de cookies do
+			// cliente (R-002, Story 2.6):
+			// - SessionRevokedError: reuse/roubo real — o service já matou a família.
+			// - ConcurrentRotationError: race benigno de 2 abas — a sessão nova do vencedor
+			//   permanece viva; só ESTE request (o perdedor) falha e tem os cookies limpos.
+			// - InactivityTimeoutError (NFR62) / SessionNotFoundError: sessão inválida.
 			clearAuthCookies(c);
 			return unauthorized(c);
 		}
