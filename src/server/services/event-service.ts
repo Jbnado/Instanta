@@ -10,11 +10,17 @@
  * - Clock injetável (`now`) pra testes determinísticos.
  * - Inserts numa transação (atomicidade evento + missões).
  */
-import { and, asc, eq, lt, ne, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lt, ne, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 
 import type { DB } from "../db/client";
-import { eventMissions, events, users } from "../db/schema";
+import {
+	eventBans,
+	eventMissions,
+	events,
+	userEventHistory,
+	users,
+} from "../db/schema";
 import { presetLabelById } from "../../lib/shared/mission-presets";
 import type {
 	CreateEventInput,
@@ -76,6 +82,18 @@ export interface EventListItem {
 export interface ActivateEventResult {
 	detail: EventDetail;
 	hostUserId: string;
+}
+
+/**
+ * Resultado de joinEvent (Story 5.1/5.3). O convidado autenticado "entra" no evento
+ * Ativo. Membership é IMPLÍCITA: não há tabela dedicada — a participação é registrada
+ * em `user_event_history` (counter aggregate, joined_at). Devolve os dados públicos do
+ * evento que a landing do convidado precisa renderizar + se é a 1ª entrada (firstJoin,
+ * pra futuros welcome/coachmarks da Story 5.5).
+ */
+export interface JoinEventResult {
+	event: EventPublic;
+	firstJoin: boolean;
 }
 
 /** Item da fila de ativação do painel admin (Story 3.4). Inclui info do host + #missões. */
@@ -141,6 +159,16 @@ export interface EventService {
 	 * retorna null — a rota mapeia null → 404 sem revelar que o evento existe.
 	 */
 	getPublicEvent(slug: string): Promise<EventPublic | null>;
+	/**
+	 * Convidado autenticado entra no evento (Story 5.1/5.3, FR17). Membership IMPLÍCITA:
+	 * qualquer usuário autenticado com a URL (o slug é o segredo, R-019) pode participar de
+	 * um evento Ativo, desde que não esteja banido. A participação é registrada em
+	 * `user_event_history` (idempotente — re-entrar não duplica a row). Lança:
+	 *  - EventNotFoundError: slug inexistente OU evento não-Ativo (R-019: não revela) OU
+	 *    usuário banido (404 genérico — não confirma o ban pro convidado).
+	 * Retorna os dados públicos do evento + firstJoin (1ª entrada).
+	 */
+	joinEvent(slug: string, userId: string): Promise<JoinEventResult>;
 	/**
 	 * Lista eventos pendentes de ativação (status Inativo) pro painel admin (Story 3.4).
 	 * Faz join com users pra trazer email/nome do host + conta as missões; ordena por data.
@@ -542,6 +570,77 @@ export function createEventService(deps: EventServiceDeps): EventService {
 	}
 
 	// ------------------------------------------------------------------------
+	// Story 5.1/5.3 — convidado entra no evento (membership implícita).
+	// ------------------------------------------------------------------------
+	async function joinEvent(
+		slug: string,
+		userId: string,
+	): Promise<JoinEventResult> {
+		// 1. Carrega o evento. Só Ativo "existe" pro convidado (R-019): Inativo/Encerrado/
+		//    inexistente → 404 genérico, idêntico a slug que não existe.
+		const [row] = await db.select().from(events).where(eq(events.slug, slug));
+		if (!row || row.status !== "Ativo") throw new EventNotFoundError();
+
+		// 2. Ban check (FR — moderação): se o convidado tem um ban ATIVO (não revertido)
+		//    neste evento, ele não entra. Devolve 404 genérico (não confirma o ban — não
+		//    damos pistas de moderação pro banido; o front trata como "indisponível").
+		const [ban] = await db
+			.select({ id: eventBans.id })
+			.from(eventBans)
+			.where(
+				and(
+					eq(eventBans.eventId, row.id),
+					eq(eventBans.userId, userId),
+					isNull(eventBans.revertedAt),
+				),
+			);
+		if (ban) throw new EventNotFoundError();
+
+		// 3. Registra a participação em user_event_history (membership implícita). Idempotente:
+		//    re-entrar não duplica — se já existe row pra (user, event), apenas reporta
+		//    firstJoin=false. O counter aggregate sobrevive ao D+30 (NFR21/NFR23).
+		const [existing] = await db
+			.select({ id: userEventHistory.id })
+			.from(userEventHistory)
+			.where(
+				and(
+					eq(userEventHistory.userId, userId),
+					eq(userEventHistory.eventId, row.id),
+				),
+			);
+
+		let firstJoin = false;
+		if (!existing) {
+			firstJoin = true;
+			await db.insert(userEventHistory).values({
+				id: crypto.randomUUID(),
+				userId,
+				eventId: row.id,
+				eventNameSnapshot: row.name,
+				eventDateSnapshot: row.eventDate,
+				hostUserId: row.hostUserId,
+				// Counters de gamificação começam zerados (Epic 10 os incrementa).
+				photosUploaded: 0,
+				reactionsReceived: 0,
+				missionsCompleted: 0,
+				instantesEarned: 0,
+				joinedAt: now(),
+			});
+		}
+
+		return {
+			event: {
+				id: row.id,
+				slug: row.slug,
+				name: row.name,
+				status: row.status,
+				colorAccent: row.colorAccent,
+			},
+			firstJoin,
+		};
+	}
+
+	// ------------------------------------------------------------------------
 	// Story 3.4 — fila de ativação do painel admin (eventos Inativo + info host).
 	// ------------------------------------------------------------------------
 	async function listPendingEventsForAdmin(): Promise<PendingEventForAdmin[]> {
@@ -586,6 +685,7 @@ export function createEventService(deps: EventServiceDeps): EventService {
 		closeEvent,
 		autoCloseExpiredEvents,
 		getPublicEvent,
+		joinEvent,
 		listPendingEventsForAdmin,
 	};
 }

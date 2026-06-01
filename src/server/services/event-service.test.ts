@@ -1,9 +1,14 @@
 import { env } from "cloudflare:test";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { getDB } from "../db/client";
-import { eventMissions, events } from "../db/schema";
+import {
+	eventBans,
+	eventMissions,
+	events,
+	userEventHistory,
+} from "../db/schema";
 import { createAuthService } from "./auth-service";
 import {
 	ActiveEventLimitError,
@@ -543,6 +548,140 @@ describe("event-service", () => {
 			expect(maio.hostEmail).toBe("pending-host@example.com");
 			expect(maio.missionsCount).toBe(1);
 			expect(typeof maio.eventDate).toBe("string");
+		});
+	});
+
+	// ========================================================================
+	// Story 5.1/5.3 — joinEvent (convidado entra; membership implícita)
+	// ========================================================================
+	describe("joinEvent", () => {
+		it("registra participação em user_event_history quando Ativo (1ª entrada)", async () => {
+			const hostId = await makeHost(db, "join-host@example.com");
+			const guestId = await makeHost(db, "join-guest@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput({ name: "Join Festa" }),
+			});
+			await service.activateEvent(created.slug);
+
+			const result = await service.joinEvent(created.slug, guestId);
+			expect(result.firstJoin).toBe(true);
+			expect(result.event.slug).toBe(created.slug);
+			expect(result.event.name).toBe("Join Festa");
+			expect(result.event.status).toBe("Ativo");
+
+			const [row] = await db
+				.select()
+				.from(userEventHistory)
+				.where(
+					and(
+						eq(userEventHistory.userId, guestId),
+						eq(userEventHistory.eventId, created.id),
+					),
+				);
+			expect(row).toBeDefined();
+			expect(row!.eventNameSnapshot).toBe("Join Festa");
+			expect(row!.hostUserId).toBe(hostId);
+			expect(row!.joinedAt).toBeInstanceOf(Date);
+		});
+
+		it("é idempotente: re-entrar não duplica a row (firstJoin=false)", async () => {
+			const hostId = await makeHost(db, "join-idem-host@example.com");
+			const guestId = await makeHost(db, "join-idem-guest@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug);
+
+			const first = await service.joinEvent(created.slug, guestId);
+			expect(first.firstJoin).toBe(true);
+			const second = await service.joinEvent(created.slug, guestId);
+			expect(second.firstJoin).toBe(false);
+
+			const rows = await db
+				.select()
+				.from(userEventHistory)
+				.where(
+					and(
+						eq(userEventHistory.userId, guestId),
+						eq(userEventHistory.eventId, created.id),
+					),
+				);
+			expect(rows.length).toBe(1);
+		});
+
+		it("evento Inativo → EventNotFoundError (R-019, não revela existência)", async () => {
+			const hostId = await makeHost(db, "join-inativo-host@example.com");
+			const guestId = await makeHost(db, "join-inativo-guest@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			// Sem ativar → continua Inativo.
+			await expect(
+				service.joinEvent(created.slug, guestId),
+			).rejects.toBeInstanceOf(EventNotFoundError);
+		});
+
+		it("slug inexistente → EventNotFoundError", async () => {
+			const guestId = await makeHost(db, "join-missing-guest@example.com");
+			await expect(
+				service.joinEvent("nao-existe-xyz", guestId),
+			).rejects.toBeInstanceOf(EventNotFoundError);
+		});
+
+		it("usuário banido (ban ativo) → EventNotFoundError; não registra participação", async () => {
+			const hostId = await makeHost(db, "join-ban-host@example.com");
+			const guestId = await makeHost(db, "join-ban-guest@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug);
+
+			await db.insert(eventBans).values({
+				id: crypto.randomUUID(),
+				eventId: created.id,
+				userId: guestId,
+				bannedByUserId: hostId,
+			});
+
+			await expect(
+				service.joinEvent(created.slug, guestId),
+			).rejects.toBeInstanceOf(EventNotFoundError);
+
+			const rows = await db
+				.select()
+				.from(userEventHistory)
+				.where(
+					and(
+						eq(userEventHistory.userId, guestId),
+						eq(userEventHistory.eventId, created.id),
+					),
+				);
+			expect(rows.length).toBe(0);
+		});
+
+		it("ban revertido NÃO bloqueia: convidado entra normalmente", async () => {
+			const hostId = await makeHost(db, "join-unban-host@example.com");
+			const guestId = await makeHost(db, "join-unban-guest@example.com");
+			const created = await service.createEvent({
+				hostUserId: hostId,
+				input: baseInput(),
+			});
+			await service.activateEvent(created.slug);
+
+			await db.insert(eventBans).values({
+				id: crypto.randomUUID(),
+				eventId: created.id,
+				userId: guestId,
+				bannedByUserId: hostId,
+				revertedAt: new Date(),
+			});
+
+			const result = await service.joinEvent(created.slug, guestId);
+			expect(result.firstJoin).toBe(true);
 		});
 	});
 });

@@ -164,3 +164,28 @@ eventRoutes.get("/:slug/public", async (c) => {
 	if (!event) return c.json({ error: "NOT_FOUND" }, 404);
 	return c.json({ event });
 });
+
+// ============================================================================
+// POST /:slug/join — convidado entra no evento (Story 5.1/5.3, FR17).
+// ============================================================================
+// authMiddleware: o convidado precisa estar autenticado pra participar (reusa a
+// mesma conta cross-role do signup, Story 2.1). Membership é IMPLÍCITA — registrada
+// em user_event_history pelo service. Evento não-Ativo/inexistente OU usuário banido
+// → 404 NOT_FOUND genérico (R-019: não revela existência nem ban). Sucesso → 200
+// { event, firstJoin } pra a landing hidratar a tela de "dentro do evento".
+eventRoutes.post("/:slug/join", authMiddleware(), async (c) => {
+	const db = getDB(c.env);
+	const service = createEventService({ db });
+	try {
+		const result = await service.joinEvent(
+			c.req.param("slug"),
+			c.get("user").id,
+		);
+		return c.json(result);
+	} catch (err) {
+		if (err instanceof EventNotFoundError) {
+			return c.json({ error: "NOT_FOUND" }, 404);
+		}
+		throw err;
+	}
+});
