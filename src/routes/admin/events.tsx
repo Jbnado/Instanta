@@ -32,6 +32,9 @@ const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
 	day: "2-digit",
 	month: "long",
 	year: "numeric",
+	// eventDate é "dia inteiro" guardado como meia-noite UTC. Formatar em UTC evita
+	// o off-by-one (BRT/UTC-3 voltaria um dia: 2026-07-15 viraria 14).
+	timeZone: "UTC",
 });
 
 function formatEventDate(iso: string): string {
