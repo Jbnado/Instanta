@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { getDB } from "../db/client";
 import { eventPhotos, events } from "../db/schema";
-import type { CfImages } from "../adapters/cf-images";
+import type { Storage, StorageObject } from "../adapters/r2-storage";
 import { createAuthService } from "./auth-service";
 import { createEventService } from "./event-service";
 import {
@@ -20,9 +20,9 @@ import {
 
 const TEST_JWT_SECRET = "test-secret-aaaa-bbbb-cccc-dddd-eeee-ffff-32-bytes";
 
-// ── Amostras de cabeçalho ────────────────────────────────────────────────────
+// ── Bytes de imagem ───────────────────────────────────────────────────────────
 // JPEG real: SOI (FF D8) + APP0/JFIF (FF E0 ... "JFIF\0") — file-type reconhece.
-const JPEG_HEADER = new Uint8Array([
+const JPEG_BYTES = new Uint8Array([
 	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01,
 	0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
 ]);
@@ -33,28 +33,40 @@ const SVG_BYTES = new TextEncoder().encode(
 // Texto puro — file-type não reconhece formato → undefined.
 const TEXT_BYTES = new TextEncoder().encode("isto não é uma imagem de verdade");
 
-interface FakeImages extends CfImages {
-	createdIds: string[];
-	deletedIds: string[];
+interface FakeStorage extends Storage {
+	putKeys: string[];
+	deletedKeys: string[];
+	objects: Map<string, { bytes: Uint8Array; contentType: string }>;
 }
 
-// Fake adapter de CF Images que captura chamadas (createSignedUploadURL + delete).
-function makeFakeImages(): FakeImages {
-	const createdIds: string[] = [];
-	const deletedIds: string[] = [];
+// Fake adapter de R2 que captura puts/deletes e guarda os objetos in-memory.
+function makeFakeStorage(): FakeStorage {
+	const putKeys: string[] = [];
+	const deletedKeys: string[] = [];
+	const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
 	return {
-		createdIds,
-		deletedIds,
-		async createSignedUploadURL() {
-			const imageId = crypto.randomUUID();
-			createdIds.push(imageId);
-			return { imageId, uploadUrl: `https://upload.test/${imageId}` };
+		putKeys,
+		deletedKeys,
+		objects,
+		keyFor(eventId, imageId) {
+			return `events/${eventId}/${imageId}`;
 		},
-		async delete(imageId: string) {
-			deletedIds.push(imageId);
+		async put(key, bytes, contentType) {
+			putKeys.push(key);
+			objects.set(key, { bytes, contentType });
 		},
-		deliveryUrl(imageId, variant) {
-			return `https://imagedelivery.net/test/${imageId}/${variant}`;
+		async get(key): Promise<StorageObject | null> {
+			const obj = objects.get(key);
+			if (!obj) return null;
+			return {
+				body: new Response(obj.bytes).body!,
+				contentType: obj.contentType,
+				size: obj.bytes.byteLength,
+			};
+		},
+		async delete(key) {
+			deletedKeys.push(key);
+			objects.delete(key);
 		},
 	};
 }
@@ -100,93 +112,87 @@ async function makeActiveEvent(
 
 describe("photo-service", () => {
 	let db: ReturnType<typeof getDB>;
-	let images: ReturnType<typeof makeFakeImages>;
+	let storage: ReturnType<typeof makeFakeStorage>;
 	let service: PhotoService;
 
 	beforeEach(() => {
 		db = getDB(env);
-		images = makeFakeImages();
-		service = createPhotoService({ db, images });
+		storage = makeFakeStorage();
+		service = createPhotoService({ db, storage });
 	});
 
-	describe("requestUpload", () => {
-		it("amostra JPEG válida → devolve uploadUrl + imageId", async () => {
-			const hostId = await makeHost(db, "req-jpeg@example.com");
-			const { slug } = await makeActiveEvent(db, hostId);
+	describe("uploadPhoto — validação (Story 6.5)", () => {
+		it("JPEG válido → insere event_photos + put no R2 + bump de bytesUsed", async () => {
+			const hostId = await makeHost(db, "up-jpeg@example.com");
+			const { slug, id } = await makeActiveEvent(db, hostId);
 
-			const res = await service.requestUpload({
+			const res = await service.uploadPhoto({
 				eventSlug: slug,
 				uploaderUserId: hostId,
-				headerSample: JPEG_HEADER,
-				sizeBytes: 1_000_000,
+				bytes: JPEG_BYTES,
 				width: 4000,
 				height: 3000,
 			});
 
-			expect(res.imageId).toBeTruthy();
-			expect(res.uploadUrl).toContain(res.imageId);
-			expect(images.createdIds).toHaveLength(1);
+			expect(res.id).toBeTruthy();
+			expect(res.storageKey).toBe(`events/${id}/${res.id}`);
+			expect(storage.putKeys).toEqual([res.storageKey]);
+
+			const [photo] = await db
+				.select()
+				.from(eventPhotos)
+				.where(eq(eventPhotos.id, res.id));
+			expect(photo).toBeDefined();
+			expect(photo!.cfImageId).toBe(res.storageKey);
+			expect(photo!.sizeBytes).toBe(JPEG_BYTES.byteLength);
+			expect(photo!.eventId).toBe(id);
+			expect(photo!.uploaderUserId).toBe(hostId);
+			expect(photo!.telaoVisible).toBe(true);
+
+			const [ev] = await db.select().from(events).where(eq(events.id, id));
+			expect(ev!.bytesUsed).toBe(JPEG_BYTES.byteLength);
 		});
 
-		it("amostra SVG → InvalidImageError (não emite URL)", async () => {
-			const hostId = await makeHost(db, "req-svg@example.com");
+		it("bytes SVG → InvalidImageError (nada gravado no R2)", async () => {
+			const hostId = await makeHost(db, "up-svg@example.com");
 			const { slug } = await makeActiveEvent(db, hostId);
 
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: slug,
 					uploaderUserId: hostId,
-					headerSample: SVG_BYTES,
-					sizeBytes: 1000,
+					bytes: SVG_BYTES,
 					width: 100,
 					height: 100,
 				}),
 			).rejects.toBeInstanceOf(InvalidImageError);
-			expect(images.createdIds).toHaveLength(0);
+			expect(storage.putKeys).toHaveLength(0);
 		});
 
 		it("texto puro (não-imagem) → InvalidImageError", async () => {
-			const hostId = await makeHost(db, "req-text@example.com");
+			const hostId = await makeHost(db, "up-text@example.com");
 			const { slug } = await makeActiveEvent(db, hostId);
 
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: slug,
 					uploaderUserId: hostId,
-					headerSample: TEXT_BYTES,
-					sizeBytes: 1000,
+					bytes: TEXT_BYTES,
 					width: 100,
 					height: 100,
-				}),
-			).rejects.toBeInstanceOf(InvalidImageError);
-		});
-
-		it("tamanho > 20MB → InvalidImageError", async () => {
-			const hostId = await makeHost(db, "req-big@example.com");
-			const { slug } = await makeActiveEvent(db, hostId);
-
-			await expect(
-				service.requestUpload({
-					eventSlug: slug,
-					uploaderUserId: hostId,
-					headerSample: JPEG_HEADER,
-					sizeBytes: 21 * 1024 * 1024,
-					width: 4000,
-					height: 3000,
 				}),
 			).rejects.toBeInstanceOf(InvalidImageError);
 		});
 
 		it("dimensões > 12k px → InvalidImageError", async () => {
-			const hostId = await makeHost(db, "req-dim@example.com");
+			const hostId = await makeHost(db, "up-dim@example.com");
 			const { slug } = await makeActiveEvent(db, hostId);
 
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: slug,
 					uploaderUserId: hostId,
-					headerSample: JPEG_HEADER,
-					sizeBytes: 1000,
+					bytes: JPEG_BYTES,
 					width: 13_000,
 					height: 100,
 				}),
@@ -194,7 +200,7 @@ describe("photo-service", () => {
 		});
 
 		it("evento não Ativo (Inativo) → InvalidEventStateError", async () => {
-			const hostId = await makeHost(db, "req-inactive@example.com");
+			const hostId = await makeHost(db, "up-inactive@example.com");
 			const eventService = createEventService({ db });
 			const created = await eventService.createEvent({
 				hostUserId: hostId,
@@ -207,13 +213,11 @@ describe("photo-service", () => {
 					customMissions: [],
 				},
 			});
-			// NÃO ativa → continua Inativo.
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: created.slug,
 					uploaderUserId: hostId,
-					headerSample: JPEG_HEADER,
-					sizeBytes: 1000,
+					bytes: JPEG_BYTES,
 					width: 100,
 					height: 100,
 				}),
@@ -221,85 +225,64 @@ describe("photo-service", () => {
 		});
 
 		it("uploader não-host → EventNotFoundError (não revela posse)", async () => {
-			const hostId = await makeHost(db, "req-owner@example.com");
-			const intruderId = await makeHost(db, "req-intruder@example.com");
+			const hostId = await makeHost(db, "up-owner@example.com");
+			const intruderId = await makeHost(db, "up-intruder@example.com");
 			const { slug } = await makeActiveEvent(db, hostId);
 
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: slug,
 					uploaderUserId: intruderId,
-					headerSample: JPEG_HEADER,
-					sizeBytes: 1000,
+					bytes: JPEG_BYTES,
 					width: 100,
 					height: 100,
 				}),
 			).rejects.toBeInstanceOf(EventNotFoundError);
 		});
+	});
 
-		it("cap pré-check: já cheio → StorageCapExceededError", async () => {
-			const hostId = await makeHost(db, "req-cap@example.com");
-			const { slug, id } = await makeActiveEvent(db, hostId, 1000);
-			// Seta bytesUsed perto do cap (cap=1000, usado=900, novo=200 → estoura).
-			await db.update(events).set({ bytesUsed: 900 }).where(eq(events.id, id));
+	describe("uploadPhoto — cap atomic (Story 6.6, R-001)", () => {
+		it("cap já cheio → StorageCapExceededError + nenhuma row + nada no R2", async () => {
+			const hostId = await makeHost(db, "up-cap@example.com");
+			const { slug, id } = await makeActiveEvent(db, hostId, 25);
+			// cap=25; JPEG_BYTES tem 20 bytes. usado=10 → 10+20=30 > 25 estoura.
+			await db.update(events).set({ bytesUsed: 10 }).where(eq(events.id, id));
 
 			await expect(
-				service.requestUpload({
+				service.uploadPhoto({
 					eventSlug: slug,
 					uploaderUserId: hostId,
-					headerSample: JPEG_HEADER,
-					sizeBytes: 200,
+					bytes: JPEG_BYTES,
 					width: 100,
 					height: 100,
 				}),
 			).rejects.toBeInstanceOf(StorageCapExceededError);
-		});
-	});
 
-	describe("confirmUpload", () => {
-		it("insere event_photos + bump de bytesUsed", async () => {
-			const hostId = await makeHost(db, "conf-ok@example.com");
-			const { slug, id } = await makeActiveEvent(db, hostId);
-
-			const res = await service.confirmUpload({
-				eventSlug: slug,
-				uploaderUserId: hostId,
-				imageId: "img-abc",
-				sizeBytes: 500_000,
-			});
-
-			expect(res.id).toBeTruthy();
-			expect(res.cfImageId).toBe("img-abc");
-
-			const [photo] = await db
+			// Cap estourou ANTES do put → nada gravado no R2, nenhuma row, bytesUsed intacto.
+			expect(storage.putKeys).toHaveLength(0);
+			const photos = await db
 				.select()
 				.from(eventPhotos)
-				.where(eq(eventPhotos.id, res.id));
-			expect(photo).toBeDefined();
-			expect(photo!.cfImageId).toBe("img-abc");
-			expect(photo!.sizeBytes).toBe(500_000);
-			expect(photo!.eventId).toBe(id);
-			expect(photo!.uploaderUserId).toBe(hostId);
-			expect(photo!.telaoVisible).toBe(true);
-
+				.where(eq(eventPhotos.eventId, id));
+			expect(photos).toHaveLength(0);
 			const [ev] = await db.select().from(events).where(eq(events.id, id));
-			expect(ev!.bytesUsed).toBe(500_000);
+			expect(ev!.bytesUsed).toBe(10);
 		});
 
-		it("R-001: Promise.all de N confirms perto do cap → só os que cabem vencem; bytesUsed nunca passa do cap", async () => {
-			const hostId = await makeHost(db, "conf-race@example.com");
-			// cap=1000; cada upload=300 → cabem 3 (900 ≤ 1000), o 4º estouraria.
-			const { slug, id } = await makeActiveEvent(db, hostId, 1000);
-			const SIZE = 300;
+		it("R-001: Promise.all de N uploads perto do cap → só os que cabem vencem; bytesUsed nunca passa do cap", async () => {
+			const hostId = await makeHost(db, "up-race@example.com");
+			// JPEG_BYTES = 20 bytes. cap=60 → cabem 3 (3*20=60 ≤ 60), os outros estouram.
+			const { slug, id } = await makeActiveEvent(db, hostId, 60);
 			const N = 6;
 
 			const results = await Promise.allSettled(
-				Array.from({ length: N }, (_, i) =>
-					service.confirmUpload({
+				Array.from({ length: N }, () =>
+					service.uploadPhoto({
 						eventSlug: slug,
 						uploaderUserId: hostId,
-						imageId: `img-race-${i}`,
-						sizeBytes: SIZE,
+						bytes: JPEG_BYTES,
+						width: 100,
+						height: 100,
 					}),
 				),
 			);
@@ -307,7 +290,6 @@ describe("photo-service", () => {
 			const fulfilled = results.filter((r) => r.status === "fulfilled");
 			const rejected = results.filter((r) => r.status === "rejected");
 
-			// Exatamente 3 cabem (3*300=900 ≤ 1000); os outros 3 estouram.
 			expect(fulfilled).toHaveLength(3);
 			expect(rejected).toHaveLength(3);
 			for (const r of rejected) {
@@ -316,47 +298,70 @@ describe("photo-service", () => {
 				);
 			}
 
-			// bytesUsed final = 900 (nunca passa do cap 1000).
+			// bytesUsed final = 60 (nunca passa do cap 60).
 			const [ev] = await db.select().from(events).where(eq(events.id, id));
-			expect(ev!.bytesUsed).toBe(900);
+			expect(ev!.bytesUsed).toBe(60);
 			expect(ev!.bytesUsed).toBeLessThanOrEqual(ev!.cap);
 
-			// Só 3 rows de foto persistiram (as que estouraram foram limpas).
+			// Só 3 rows de foto persistiram (as que estouraram não inseriram).
 			const photos = await db
 				.select()
 				.from(eventPhotos)
 				.where(eq(eventPhotos.eventId, id));
 			expect(photos).toHaveLength(3);
 
-			// Cleanup de órfã: images.delete chamado pros 3 que falharam.
-			expect(images.deletedIds).toHaveLength(3);
+			// Só 3 puts no R2 (os que estouraram nunca chegaram ao put).
+			expect(storage.putKeys).toHaveLength(3);
+		});
+	});
+
+	describe("getPhotoFile — serving (R2)", () => {
+		it("foto existente → devolve o objeto do R2", async () => {
+			const hostId = await makeHost(db, "get-ok@example.com");
+			const { slug } = await makeActiveEvent(db, hostId);
+			const up = await service.uploadPhoto({
+				eventSlug: slug,
+				uploaderUserId: hostId,
+				bytes: JPEG_BYTES,
+				width: 100,
+				height: 100,
+			});
+
+			const obj = await service.getPhotoFile({ eventSlug: slug, photoId: up.id });
+			expect(obj).not.toBeNull();
+			expect(obj!.contentType).toBe("image/jpeg");
+			expect(obj!.size).toBe(JPEG_BYTES.byteLength);
 		});
 
-		it("cap estoura → StorageCapExceededError + images.delete (cleanup órfã) + nenhuma row", async () => {
-			const hostId = await makeHost(db, "conf-cap@example.com");
-			const { slug, id } = await makeActiveEvent(db, hostId, 1000);
-			await db.update(events).set({ bytesUsed: 900 }).where(eq(events.id, id));
+		it("photoId inexistente → null", async () => {
+			const hostId = await makeHost(db, "get-missing@example.com");
+			const { slug } = await makeActiveEvent(db, hostId);
+			const obj = await service.getPhotoFile({
+				eventSlug: slug,
+				photoId: crypto.randomUUID(),
+			});
+			expect(obj).toBeNull();
+		});
 
-			await expect(
-				service.confirmUpload({
-					eventSlug: slug,
-					uploaderUserId: hostId,
-					imageId: "img-orphan",
-					sizeBytes: 200, // 900+200=1100 > 1000.
-				}),
-			).rejects.toBeInstanceOf(StorageCapExceededError);
+		it("photoId de OUTRO evento → null (anti-IDOR cross-event)", async () => {
+			const hostA = await makeHost(db, "get-a@example.com");
+			const hostB = await makeHost(db, "get-b@example.com");
+			const evA = await makeActiveEvent(db, hostA);
+			const evB = await makeActiveEvent(db, hostB);
+			const up = await service.uploadPhoto({
+				eventSlug: evA.slug,
+				uploaderUserId: hostA,
+				bytes: JPEG_BYTES,
+				width: 100,
+				height: 100,
+			});
 
-			expect(images.deletedIds).toContain("img-orphan");
-
-			const photos = await db
-				.select()
-				.from(eventPhotos)
-				.where(eq(eventPhotos.eventId, id));
-			expect(photos).toHaveLength(0);
-
-			// bytesUsed inalterado.
-			const [ev] = await db.select().from(events).where(eq(events.id, id));
-			expect(ev!.bytesUsed).toBe(900);
+			// Pede a foto de A usando o slug de B → não casa o innerJoin → null.
+			const obj = await service.getPhotoFile({
+				eventSlug: evB.slug,
+				photoId: up.id,
+			});
+			expect(obj).toBeNull();
 		});
 	});
 });

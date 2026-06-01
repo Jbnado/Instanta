@@ -1,75 +1,56 @@
 import { z } from "zod";
 
 /**
- * Schemas de upload de foto (Epic 6, Stories 6.5-6.7).
+ * Schemas de upload de foto (Epic 6, Stories 6.5-6.7) — pivot CF Images → R2.
  *
- * Fonte única consumida pelo cliente (captura/upload) e pelo handler Hono
- * (@hono/zod-validator). O fluxo tem DUAS chamadas ao Worker:
+ * Fonte única consumida pelo cliente (captura/upload) e pelo handler Hono. O fluxo
+ * agora é UMA chamada com upload ATRAVÉS do Worker pro R2 (free tier, egress zero),
+ * não mais o stub de signed-URL direto pro CF Images:
  *
- * 1. `POST /api/events/:slug/upload-url` (uploadRequestSchema): o cliente manda
- *    metadata + uma amostra base64 do CABEÇALHO do arquivo (primeiros ~64 bytes).
- *    O Worker valida magic bytes via `file-type` (Story 6.5) ANTES de emitir a URL
- *    assinada — como o upload vai direto pro CF Images, o Worker nunca vê os bytes
- *    completos, então a validação acontece no request, não num fetch pós-upload.
+ * `POST /api/events/:slug/photos` (uploadPhotoQuerySchema nos query params): o cliente
+ *    comprime/redimensiona a foto e manda os BYTES no corpo (Content-Type da imagem),
+ *    com `width`/`height` nos query params. O Worker valida magic bytes via `file-type`
+ *    nos bytes REAIS (Story 6.5), reserva o cap atomicamente (Story 6.6, R-001), insere
+ *    a row em event_photos e grava o objeto no R2 (`PHOTOS.put`).
  *
- * 2. `POST /api/events/:slug/photos` (confirmUploadSchema): depois do upload direto
- *    pro CF Images, o cliente confirma com o `imageId` pré-alocado + o tamanho real.
- *    O Worker reserva o cap atomicamente (Story 6.6) e insere a row em event_photos.
+ * As imagens são servidas pelo Worker (R2 não é público) via
+ * `GET /api/events/:slug/photos/:photoId/file`.
  */
 
 // Tetos de validação server-side (Story 6.5, NFR57).
-// 20MB pré-compressão: arquivo bruto vindo da câmera/galeria.
+// 20MB pós-compressão (limite do corpo aceito pelo Worker).
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 // Dimensão máxima por lado: barreira anti decompression bomb.
 export const MAX_IMAGE_DIMENSION = 12_000;
 
+// Mime types aceitos no corpo do upload (espelha ALLOWED_MIMES do photo-service).
+// A validação de verdade é magic bytes nos bytes reais; isto só gateia o Content-Type.
+export const ALLOWED_UPLOAD_MIMES = [
+	"image/jpeg",
+	"image/png",
+	"image/heic",
+	"image/heif",
+] as const;
+
 /**
- * Request de URL de upload assinada. `headerSample` é o cabeçalho do arquivo em
- * base64 (poucos bytes — só o suficiente pro file-type reconhecer o formato). O
- * número exato de bytes não é fixado aqui (o cliente manda ~64); só limitamos o
- * teto pra evitar payload inflado, já que NÃO é o arquivo inteiro.
+ * Query params do upload. As dimensões vêm do cliente (o Worker não decodifica a
+ * imagem — só valida magic bytes + tamanho dos bytes). `coerce` porque query params
+ * chegam como string.
  */
-export const uploadRequestSchema = z.object({
-	// base64 do cabeçalho do arquivo. min(1) garante que algo veio; o teto evita
-	// que o cliente mande o arquivo inteiro disfarçado de "amostra".
-	headerSample: z
-		.string()
-		.min(1, { message: "Amostra do cabeçalho ausente." })
-		.max(4096, { message: "Amostra do cabeçalho grande demais." }),
-	// Tamanho declarado do arquivo (validado de novo no confirm com o valor real).
-	sizeBytes: z
-		.number()
-		.int()
-		.positive({ message: "Tamanho inválido." })
-		.max(MAX_UPLOAD_BYTES, { message: "Arquivo maior que 20MB." }),
-	width: z
+export const uploadPhotoQuerySchema = z.object({
+	width: z.coerce
 		.number()
 		.int()
 		.positive({ message: "Largura inválida." })
 		.max(MAX_IMAGE_DIMENSION, { message: "Imagem larga demais." }),
-	height: z
+	height: z.coerce
 		.number()
 		.int()
 		.positive({ message: "Altura inválida." })
 		.max(MAX_IMAGE_DIMENSION, { message: "Imagem alta demais." }),
 });
 
-export type UploadRequestInput = z.infer<typeof uploadRequestSchema>;
-
-/**
- * Confirmação pós-upload. O `imageId` é o id pré-alocado devolvido pelo passo 1;
- * o `sizeBytes` é o tamanho REAL do arquivo enviado (base do contador de cap).
- */
-export const confirmUploadSchema = z.object({
-	imageId: z.string().min(1, { message: "imageId ausente." }),
-	sizeBytes: z
-		.number()
-		.int()
-		.positive({ message: "Tamanho inválido." })
-		.max(MAX_UPLOAD_BYTES, { message: "Arquivo maior que 20MB." }),
-});
-
-export type ConfirmUploadInput = z.infer<typeof confirmUploadSchema>;
+export type UploadPhotoQuery = z.infer<typeof uploadPhotoQuerySchema>;
 
 /** Códigos de erro de foto retornados em response.error (mapeados pra HTTP na rota). */
 export const PHOTO_ERROR_CODES = {

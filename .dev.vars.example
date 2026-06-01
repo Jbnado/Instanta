@@ -27,14 +27,9 @@ AUTH_JWT_SECRET=dev-only-rotate-me-with-real-secret-generated-locally
 # Em prod: `wrangler secret put MFA_ENCRYPTION_KEY`. NUNCA commitar valor real aqui.
 MFA_ENCRYPTION_KEY=dev-only-mfa-key-base64-32-bytes-replace-me=
 
-# Cloudflare Images (Epic 6, Stories 6.5-6.7). AINDA NÃO PROVISIONADO: enquanto os
-# três estiverem vazios, o adapter `cf-images.ts` roda em modo STUB (image ids fake,
-# upload URL fake, delete no-op). Quando o serviço for criado no dashboard CF:
-#   - CF_IMAGES_ACCOUNT_ID  = id da conta Cloudflare (Images → API).
-#   - CF_IMAGES_API_TOKEN   = token com permissão Images:Edit (`wrangler secret put`).
-#   - CF_IMAGES_ACCOUNT_HASH= hash público de delivery (https://imagedelivery.net/<hash>/...).
-# Em prod o token vai por `wrangler secret put CF_IMAGES_API_TOKEN`; account id/hash
-# podem ir em `vars` no wrangler.jsonc (não são secretos).
-CF_IMAGES_ACCOUNT_ID=
-CF_IMAGES_API_TOKEN=
-CF_IMAGES_ACCOUNT_HASH=
+# Storage de fotos: Cloudflare R2 (Epic 6 — pivot do stub CF Images → R2 free tier).
+# NÃO há secret pra isso: o R2 é um BINDING (`PHOTOS`) declarado em wrangler.jsonc, não
+# uma var/secret. Em dev local, `wrangler dev`/miniflare criam um bucket R2 efêmero
+# automaticamente pro binding. Em prod, o bucket `instanta-photos` precisa existir:
+#   wrangler r2 bucket create instanta-photos   (R2 habilitado na conta CF)
+# Ver docs/runbook.md § R2.

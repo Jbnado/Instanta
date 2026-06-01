@@ -474,3 +474,42 @@ pnpm dlx wrangler d1 info instanta-dev --env=""
 ```
 
 Mostra `file_size` no JSON output. Rode mensalmente.
+
+---
+
+## R2: storage de fotos (Epic 6)
+
+Fotos vivem no **Cloudflare R2** (free tier: 10GB grátis + egress ZERO), não em CF Images.
+Decisão de produto: tudo grátis. O cap default do evento (`events.cap` = 10GB) casa com o
+free tier. Upload e serving passam **pelo Worker** (R2 não é público).
+
+### Fluxo
+
+- **Upload** — `POST /api/events/:slug/photos` (auth host). O cliente comprime a foto e
+  manda os BYTES no corpo (`Content-Type: image/jpeg|png|heic|heif`), com `?width=&height=`
+  na query. O Worker valida magic bytes nos bytes reais (`file-type`), reserva o cap
+  atomicamente (CAS, R-001), insere `event_photos` e faz `PHOTOS.put(key, bytes)`.
+- **Serving** — `GET /api/events/:slug/photos/:photoId/file` (público). `PHOTOS.get(key)`
+  → stream com `Cache-Control: public, max-age=31536000, immutable`.
+- **Key scheme** — `events/<eventId>/<photoId>`. Guardada em `event_photos.cf_image_id`
+  (nome de coluna mantido pra evitar migration; semântica agora é "R2 key").
+
+### Provisionar em prod (OBRIGATÓRIO antes do 1º deploy com fotos)
+
+O binding `PHOTOS` em `wrangler.jsonc` aponta pro bucket `instanta-photos`. O bucket
+**precisa existir** e o R2 **precisa estar habilitado na conta** antes do deploy:
+
+```bash
+# R2 habilitado na conta (uma vez, via dashboard: R2 → Enable / aceitar termos).
+wrangler r2 bucket create instanta-photos
+```
+
+Em dev local, `wrangler dev`/miniflare criam um R2 efêmero pro binding automaticamente —
+nada a provisionar. Nos testes, `vitest.workers.config.ts` declara `r2Buckets: ["PHOTOS"]`
+(R2 in-memory por teste).
+
+### Cleanup (D+30 / delete)
+
+`auto-clean-d30` (cron) e o delete de foto (Story 6.11) devem remover os objetos do R2
+além das rows D1 — varrer/`PHOTOS.delete` o prefixo `events/<eventId>/`. (Hoje o cron só
+mexe em D1; estender quando o delete físico de objeto entrar.)

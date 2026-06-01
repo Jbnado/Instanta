@@ -34,6 +34,10 @@ export default defineConfig({
 						// MFA admin-only ser determinístico.
 						ADMIN_EMAIL: "admin@instanta.test",
 					},
+					// R2 efêmero pro storage de fotos (Epic 6 — pivot CF Images → R2).
+					// Miniflare cria um bucket local in-memory pro binding PHOTOS; é zerado
+					// entre testes por isolatedStorage abaixo.
+					r2Buckets: ["PHOTOS"],
 					compatibilityFlags: ["nodejs_compat"],
 				},
 				// Zera D1/KV/DO entre testes — sobrescreve a granularidade que a
